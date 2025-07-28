@@ -1,0 +1,47 @@
+## Discussion: The GPU Computing Stack from CUDA to PyTorch
+
+This chapter navigates the intricate process of building a high-performance statistical application from first principles. By assembling an MCMC sampler in CUDA C++, we engaged directly with the GPU, manually managing memory, organizing thousands of threads, and ensuring the statistical validity of parallel random number generation. This detailed construction provides a necessary perspective on how modern high-performance tools are truly built.
+
+The high performance of GPU implementations seen in many modern libraries is often achieved through this exact kind of custom-written, low-level code. The highly-optimized XGBoost library, for instance, relies on a suite of CUDA kernels to execute its `gpu_hist` method efficiently. The development of such novel and specialized tools required a direct engagement with the underlying hardware, and **CUDA** provides the granular control over memory and its thousands of processing cores that is essential for this work.
+
+This foundational layer of low-level engineering enables a second, complementary paradigm: high-level abstraction. Frameworks like **PyTorch** build upon these powerful, low-level primitives to offer a highly productive and accessible programming environment. They abstract away the immense complexity of hardware management, allowing developers to focus on statistical and algorithmic logic. The simplicity of the high-level API is a direct result of the complexity handled by the underlying, often CUDA-based kernels.
+
+To illustrate this layered structure, consider again the calculation of the log-posterior. The explicit loops and manual indexing in our CUDA C++ kernel are replaced by a single, expressive line in PyTorch.
+
+```{python, eval=FALSE, echo=TRUE}
+import torch
+
+# Assume 'd_data' is our dataset, now as a PyTorch tensor
+# and we are evaluating a batch of 'proposed_mu' values in parallel.
+N_data = 1000
+N_chains = 16384
+sigma2 = 4.0
+mu0 = 0.0
+tau2_0 = 100.0
+
+# Ensure tensors are on the GPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+d_data = torch.randn(N_data, device=device) * 2 + 10 # Example data
+proposed_mu = torch.randn(N_chains, device=device)    # Example proposals
+
+def log_posterior_pytorch(mu, data):
+    # Log-prior: N(mu | mu0, tau2_0)
+    log_prior = -0.5 * (mu - mu0)**2 / tau2_0
+    
+    # Log-likelihood: N(data | mu, sigma2)
+    # The sum is broadcast automatically across all chains
+    log_likelihood = -0.5*torch.sum((data.unsqueeze(0)-mu.unsqueeze(1))**2,\
+                                    dim=1) / sigma2
+    
+    return log_prior + log_likelihood
+
+# This single call triggers pre-compiled, highly-optimized CUDA kernels
+log_p = log_posterior_pytorch(proposed_mu, d_data)
+
+print(f"Computed log-posterior for {log_p.shape[0]} chains\
+      on device: {log_p.device}")
+```
+
+When this Python code is executed, PyTorch calls its own optimized, pre-compiled kernels, themselves written in a low-level language like CUDA C++, to perform the computation on the GPU. The low-level control of the engineer enables the rapid abstraction of the statistician and the data scientist.
+
+Therefore, the spectrum of GPU development is not a matter of choosing one tool over another, but of understanding how they fit together. The ecosystem thrives on both: developers who write low-level CUDA code to build the foundational engines of computation, and statisticians and scientists who use high-level tools to rapidly build, test, and deploy models. By offering this glimpse into the creation process, we complete the narrative that has taken us from theoretical rationale and empirical proof to the enabling technology itself. We are thus equipped with a holistic view of high-performance statistical computing.

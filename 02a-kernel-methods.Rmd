@@ -1,0 +1,433 @@
+## Kernel Methods at Scale with Falkon {#kernel-methods}
+
+Kernel methods are a class of powerful statistical and machine learning techniques that enable non-linear relationships to be modelled efficiently. They achieve this by mapping input data into a high-dimensional feature space, upon which simple and well-understood linear algorithms can be deployed. The ability to treat complex non-linear problems linearly is intuitively propitious; but it comes at high time and space complexities, $O(n^3)$ and $O(n^2)$ respectively.
+
+Novel research on kernel methods [@rudi2018falkonoptimallargescale] comes to remedy this scalability profile through approximation techniques like Nyström, stochastic subsampling, iterative solvers, and preconditioning. Modern implementations of these ideas, like the one brought forth by @meanti2020kernelmethodsroofhandling also leverage advancements in computing hardware to accelerate the solution of the underlying optimization problem.
+
+This section begins with a brief introduction to kernel methods, discusses their computational pain points, and provides a glimpse into ways to scale them using GPU acceleration. In particular, we examine the ideas brought forth by the Falkon algorithm, which implements a version of approximate ridge regression that can handle potentially billions of points.
+
+### Foundations of Kernel Methods
+
+To set the stage, we briefly review the fundamentals of kernel methods, including Cover's theorem, the kernel trick, common kernel functions, and their canonical applications in classification and regression.
+
+#### Cover's Theorem and the Kernel Trick
+
+The performance of many statistical and machine learning algorithms relies on the linear separability of the data. In practice, however, real-world data is very often not linearly separable in its original form. This challenge was famously addressed by @4038449 in what became known as *Cover's theorem*, which states that a complex pattern-classification problem cast in a high-dimensional space non-linearly is more likely to be linearly separable than in a low-dimensional space. Simply phrased, linear separability can be introduced by mapping data to a higher-dimensional space. Unfortunately, this transformation is often computationally infeasible in its explicit form, particularly for very high-dimensional spaces.
+
+This is precisely the challenge that kernel methods are designed to overcome. Kernel methods are part of a broader class of methods called nonparametric learning. These methods do not assume a predefined structure or parametric form for a model. They rely on the *kernel trick*, which allows computations in a high-dimensional feature space without explicitly transforming the data into that space. Instead, a kernel function calculates the inner product between data points directly in this higher-dimensional space, saving computational effort.
+
+This "trick" is enabled by a kernel function, $K$, which mathematically formalizes this shortcut. Whereas typically finding the inner product between the projections of two points $\mathbf{x}$ and $\mathbf{y}$ would first necessitate use of a transformation function $\phi$ to explicitly map them into a high-dimensional feature space, the kernel function allows direct calculation of the dot product between those projections without ever computing $\phi(\mathbf{x})$ and $\phi(\mathbf{y})$. This relationship becomes the foundation of kernel methods:
+  
+\begin{equation}
+K(\mathbf{x},\mathbf{y}) = \phi(\mathbf{x}) \cdot \phi(\mathbf{y})
+(\#eq:kernel-trick)
+\end{equation}
+
+The inner product operation within a linear algorithm can systematically be replaced with a chosen kernel function $K(\mathbf{x}, \mathbf{y})$, thus operating in the high-dimensional space implicitly and sidestepping the computational burden of the transformation. This powerful technique is invaluable in applications such as Support Vector Machines (SVMs), Gaussian Processes, Kernel Principal Component Analysis (Kernel PCA), and more.
+
+#### Kernel Functions and the RBF Kernel
+
+The intuition on why a kernel function is more efficient than an explicit feature transformation $\phi(\cdot)$ can be built by considering the simple case of a Polynomial kernel. Consider two-dimensional input data, so two vectors $\mathbf{x} = (x_1, x_2)$ and $\mathbf{y} = (y_1, y_2)$. A Polynomial kernel of degree $2$ can be defined as:
+
+\begin{equation}
+K(\mathbf{x}, \mathbf{y} ) = (\mathbf{x} \cdot \mathbf{y})^2
+(\#eq:polynomial-kernel)
+\end{equation}
+
+Calculating this is computationally cheap. It's a dot product (2 multiplications, 1 addition), followed by one more multiplication. Compare this to the explicit feature map $\phi(\mathbf{x})$ that this kernel corresponds to:
+
+\begin{equation}
+\phi(\mathbf{x}) = (x_1^2, \sqrt{2} x_1 x_2, x_2^2)
+(\#eq:polynomial-feature-map)
+\end{equation}
+
+To use the feature map directly, both $\mathbf{x}$ and $\mathbf{y}$ would need to be transformed to this new 3D space, and then the dot product of these projections would have to be computed:
+
+\begin{equation}
+\phi(\mathbf{x}) \cdot \phi(\mathbf{y}) = (x_1^2, \sqrt{2} x_1 x_2, x_2^2) \cdot (y_1^2, \sqrt{2} y_1 y_2, y_2^2) = x_1^2 y_1^2 + 2 x_1 x_2 y_1 y_2 + x_2^2 y_2^2
+(\#eq:projections-dot-product)
+\end{equation}
+
+It can be shown with simple algebra that this result is identical to the right-hand side of \@ref(eq:polynomial-kernel). However, the kernel function $K(\mathbf{x}, \mathbf{y})$ was able to get to it in just three operations, whereas the explicit transformation required creating two new three-dimensional vectors and then performing a more complex dot product. The computational savings from using the kernel become immense for higher-dimensional data. This is the essence of the kernel trick's efficiency.
+
+In practice, a variety of kernels are used depending on the structure of the data and the problem at hand. One of the most widely used kernel functions is the *Radial Basis Function (RBF) kernel*, also known as the *Gaussian kernel*. It is defined as:
+
+\begin{equation}
+K(\mathbf{x},\mathbf{y}) = \exp\left(- \frac{\|\mathbf{x}-\mathbf{y}\|^2}{2 \sigma^2}\right)
+(\#eq:gaussian-kernel)
+\end{equation}
+
+This is often parameterized using $\gamma = \frac{1}{2 \sigma^2}$, leading to the equivalent expression:
+  
+\begin{equation}
+K(\mathbf{x},\mathbf{y}) = \exp\left(-\gamma \|\mathbf{x} - \mathbf{y}\|^2\right)
+(\#eq:rbf-kernel)
+\end{equation}
+
+The RBF kernel's value is based on the Euclidean distance between points $\mathbf{x}$ and $\mathbf{y}$. It acts as a similarity measure, returning the value of $1$ if the points are identical and decaying towards $0$ as they move farther apart. The hyperparameter $\gamma > 0$ controls the "width" of the kernel, defining how much influence a single training sample has. A small $\gamma$ results in a broader kernel, where distant points have more influence, while a large $\gamma$ creates a narrow kernel, making the model more sensitive to the local vicinity of each point. A key theoretic advantage of the RBF kernel is that its corresponding feature space $\phi(\cdot)$ is infinite-dimensional, allowing it to model highly complex, non-linear patterns.
+
+While the RBF kernel is a popular default choice, other common kernel functions include:
+  
+* **Linear Kernel**: $K(\mathbf{x}, \mathbf{y}) = \mathbf{x} \cdot \mathbf{y}$. This is the simplest kernel, representing the standard inner product. It is used when the data is expected to be linearly separable and serves as a fast, fundamental baseline. It does not add any non-linearity.
+* **Polynomial Kernel**: $K(\mathbf{x}, \mathbf{y}) = (\mathbf{x} \cdot \mathbf{y} + c)^d$. This kernel captures polynomial interactions between features up to degree $d$. The parameter $c \ge 0$ trades off the influence of lower-degree terms versus higher-degree terms.
+* **Sigmoid Kernel**: $K(\mathbf{x}, \mathbf{y}) = tanh(\alpha \mathbf{x} \cdot \mathbf{y} + c)$. It is also known as the hyperbolic tangent kernel, and its form is inspired by the activation functions used in neural networks. It essentially mimics the activation function of a single-layer perceptron.
+
+These kernel functions power a variety of tasks like classification, regression, and in general, pattern recognition. Choosing the right kernel and its hyperparameters is a critical aspect of model selection.
+
+#### Kernel Methods in Classification and Regression
+
+Regardless of the specific kernel used, any algorithm that relies on forming the full kernel matrix will face the same computational hurdles. This section showcases two popular applications of kernel methods as canonical examples demonstrating these challenges and motivating the need for scalable approximation techniques: *Support Vector Machines (SVM)*, which demonstrates how kernels enable non-linear decision boundaries in classification, and, importantly for Falkon, *Kernel Ridge Regression (KRR)*, which extends linear regression to complex manifolds.
+
+##### Support Vector Machines
+
+Support Vector Machines (SVMs) leverage kernel methods to tackle complex classification tasks, transforming non-linearly separable data into manageable decision boundaries. SVMs work by identifying the optimal hyperplane that maximizes the margin between data points of different classes. When data is not linearly separable in its original space, the SVM algorithm employs the kernel trick, as shown in \@ref(eq:kernel-trick), to implicitly map data into a higher-dimensional feature space where linear separation becomes feasible. Common kernels, such as the RBF kernel defined in \@ref(eq:rbf-kernel), enable this transformation by computing pairwise similarities without explicitly calculating the mapped coordinates.
+
+```{r svm-plots, fig.cap = "SVM classification of synthetic data using an RBF kernel.", fig.width=5, fig.height=5, out.width="45%", fig.show='hold', fig.align='center'}
+# Load necessary libraries
+require(data.table)
+require(e1071)
+
+# Generate circular data
+set.seed(6)
+n <- 100
+
+# A: Cluster near the origin
+class_A <- data.table(x = rnorm(n, mean = 0, sd = 0.5),
+                      y = rnorm(n, mean = 0, sd = 0.5))
+
+# B: Points in a ring around the origin
+angles <- runif(n, 0, 2 * pi)
+radii <- rnorm(n, mean = 2, sd = 0.5)
+class_B <- data.table(x = radii * cos(angles),
+                      y = radii * sin(angles))
+
+# Set classes
+class_A[, label := "A"]
+class_B[, label := "B"]
+
+# Combine the classes
+data <- rbind(class_A, class_B)
+data[, label := as.factor(label)]
+
+# Train SVM model with RBF kernel
+svm_model <- svm(label ~ ., data = data, kernel = "radial", cost = 1, gamma = 1)
+
+# Predict and create decision boundary
+grid <- expand.grid(x = seq(-3, 3, length.out = 200),
+                    y = seq(-3, 3, length.out = 200))
+setDT(grid)
+grid[, label := predict(svm_model, grid)]
+
+# Plot 1: Data only (left)
+plot(data$x, data$y, col = ifelse(data$label == "A", "red", "blue"), pch = 19,
+     xlab = "x", ylab = "y", main = "Synthetic Data In Two Classes")
+
+# Plot 2: Data with decision boundary (right)
+plot(data$x, data$y, col = ifelse(data$label == "A", "red", "blue"), pch = 19,
+     xlab = "x", ylab = "y", main = "SVM with RBF Kernel")
+z <- matrix(as.numeric(grid$label == "A"), nrow = 200)
+contour(seq(-3, 3, length.out = 200), seq(-3, 3, length.out = 200), z,
+        levels = 0.5, add = TRUE, drawlabels = FALSE, col = "black", lwd = 2)
+```
+
+Figure \@ref(fig:svm-plots) demonstrates the effectiveness of SVMs with an RBF kernel. The left panel shows synthetic belonging to two classes: Class A, a cluster near the origin (red), and Class B, a ring encircling it (blue), which are not linearly separable in their original 2D space. The right panel applies an RBF kernel, mapping the data into a higher-dimensional space where a linear hyperplane separates them. Projected back to 2D, this decision boundary appears as a circle, enabling the SVM to classify future points based on their position relative to this boundary.
+
+SVMs can be defined by a primal problem that seeks to find a separating hyperplane with maximum margin. However, the primal problem scales poorly with data dimensionality and sample size. Instead, the problem is typically solved in its dual form, where the kernel trick can be directly applied. Considering kernel function $K(\mathbf{x}_i, \mathbf{x}_j)$, this involves maximizing the following objective function with respect to a set of coefficients $\boldsymbol{\alpha}$, subject to constraints ($0 \le \alpha_i \le C$ and $\sum_{i=1}^{n} \alpha_i y_i = 0$):
+  
+\begin{equation}
+\max_{\boldsymbol{\alpha}} \sum_{i=1}^{n} \alpha_i - \frac{1}{2} \sum_{i=1}^{n} \sum_{j=1}^{n} \alpha_i \alpha_j y_i y_j K(\mathbf{x}_i, \mathbf{x}_j)
+(\#eq:dual-svm)
+\end{equation}
+
+A key insight of the dual is that the solution is sparse, meaning that only the coefficients $\alpha_i$ corresponding to the most critical data points (the *support vectors*) will be non-zero. The computational structure of this problem, and its inherent bottleneck, becomes undeniable when expressed in matrix form:
+
+\begin{equation}
+\max_{\boldsymbol{\alpha}} \quad \mathbf{1}^{\top} \boldsymbol{\alpha} - \frac{1}{2} \boldsymbol{\alpha}^{\top} (\mathbf{Y} \mathbf{K} \mathbf{Y}) \boldsymbol{\alpha}
+(\#eq:dual-svm-matrix)
+\end{equation}
+
+Here, $\mathbf{Y}$ is a diagonal matrix with entries $y_i$ representing the class labels ($y_i = \pm 1$) and, most critically, $\mathbf{K}$ is the $n \times n$ kernel matrix of all pairwise kernel evaluations. Equation \@ref(eq:dual-svm-matrix) decisively shows that the optimization hinges on this kernel matrix. The necessity of computing, storing and operating on $\mathbf{K}$ results in at least $O(n^2)$ time and space complexity. This type of constrained optimization is known as a Quadratic Programming (QP) problem, and it is typically solved using highly specialized algorithms like Sequential Minimal Optimization (SMO) [@Platt1998]. However, the reliance of the full kernel matrix makes any such standard solver prohibitive for very large datasets, motivating the search for accelerated and approximate methods.
+
+##### Kernel Ridge Regression
+
+Kernel Ridge Regression (KRR) extends Ridge Regression to learn non-linear relationships by incorporating the kernel trick. While standard Ridge Regression finds a linear function that fits the data with an added penalty to control model complexity, KRR operates in high-dimensional feature space, allowing it to model complex patterns. Like SVM, KRR relies on a kernel matrix to compute similarities, but its goal is regression rather than classification.
+
+```{r krr-plots, fig.cap = "Kernel Ridge Regression on synthetic non-linear data following a sinusoidal pattern", fig.width=5, fig.height=5, out.width="45%", fig.show='hold', fig.align='center'}
+# Load necessary libraries
+require(kernlab)
+
+# Generate data
+set.seed(6)
+n <- 100
+x <- seq(0, 10, length.out = n)
+y_true <- sin(x)
+noise <- rnorm(n, mean = 0, sd = 0.2)
+y <- y_true + noise
+X <- matrix(x, ncol = 1)
+
+# Define parameters
+lambda <- 0.1
+sigma <- 1
+
+# Define kernels
+linear_kernel <- vanilladot()
+rbf_kernel <- rbfdot(sigma = sigma)
+
+# Compute kernel matrices
+K_linear <- kernelMatrix(linear_kernel, X)
+K_rbf <- kernelMatrix(rbf_kernel, X)
+
+# Compute alpha
+alpha_linear <- solve(K_linear + lambda * diag(n), y)
+alpha_rbf <- solve(K_rbf + lambda * diag(n), y)
+
+# Generate grid for prediction
+x_grid <- seq(0, 10, length.out = 200)
+X_grid <- matrix(x_grid, ncol = 1)
+
+# Compute predictions
+y_pred_linear <- kernelMatrix(linear_kernel, X_grid, X) %*% alpha_linear
+y_pred_rbf <- kernelMatrix(rbf_kernel, X_grid, X) %*% alpha_rbf
+
+# Plot 1: KRR with Linear Kernel
+plot(x, y, pch = 19, col = "blue", xlab = "x", ylab = "y", main = "KRR with Linear Kernel")
+lines(x_grid, y_pred_linear, col = "red", lwd = 2)
+
+# Plot 2: KRR with RBF Kernel
+plot(x, y, pch = 19, col = "blue", xlab = "x", ylab = "y", main = "KRR with RBF Kernel")
+lines(x_grid, y_pred_rbf, col = "red", lwd = 2)
+```
+
+Figure \@ref(fig:krr-plots) demonstrates KRR's ability to model non-linear relationships using different kernels. On the left panel, KRR with a linear kernel is shown, equivalent to standard ridge regression. The right panel shows KRR with an RBF kernel, effectively fitting the non-linear data.
+
+The process begins with the standard Ridge Regression objective, but assumes the linear model exists in the feature space mapped by $\phi (\cdot)$:
+
+\begin{equation}
+\min_{\mathbf{w}} \sum_{i=1}^{n} (y_i - \langle \phi(\mathbf{x}_i), \mathbf{w} \rangle)^2 + \lambda \|\mathbf{w}\|^2
+(\#eq:krr-primal)
+\end{equation}
+
+Here, we seek a weight vector $\mathbf{w}$ in the high-dimensional feature space. The Representer Theorem [@Scholkopf2001] states that the solution $\mathbf{w}^*$ can be expressed as a linear combination of the mapped training points:
+
+\begin{equation}
+\mathbf{w}^* = \sum_{i=1}^{n} \alpha_i \phi(\mathbf{x}_i)
+\end{equation}
+
+In this context, $\boldsymbol{\alpha}$ is a vector of dual coefficients. Substituting this into \@ref(eq:krr-primal) allows us to reframe the problem in terms of $\boldsymbol{\alpha}$:
+
+* The inner product becomes $\langle \phi(\mathbf{x}_i), \mathbf{w} \rangle = \sum_{j=1}^n \alpha_j K(\mathbf{x}_i, \mathbf{x}_j)$, which is nothing but the $i$-th entry of the vector $\mathbf{K} \boldsymbol{\alpha}$, and
+* The regularization term $\|\mathbf{w}\|^2$ becomes $\boldsymbol{\alpha}^{\top} \mathbf{K} \boldsymbol{\alpha}$.
+
+This transforms the minimization problem into one that depends only on the kernel matrix $\mathbf{K}$, combining a least-squares loss with a regularization term defined in a Reproducing Kernel Hilbert Space (RKHS), as explained by @Hastie2009[Chapter 5.8]:
+
+\begin{equation}
+\min_{\boldsymbol{\alpha}} \|\mathbf{y} - \mathbf{K} \boldsymbol{\alpha} \|^2_2 + \lambda \boldsymbol{\alpha}^{\top} \mathbf{K} \boldsymbol{\alpha}
+(\#eq:krr-dual)
+\end{equation}
+
+Unlike SVM, this objective function is a simple quadratic and can be minimized by taking the derivative with respect to $\boldsymbol{\alpha}$ and setting it to zero. This yields a direct, closed-form solution for the coefficients:
+
+\begin{equation}
+\boldsymbol{\alpha} = (\mathbf{K} + \lambda \mathbf{I})^{-1} \mathbf{y}
+(\#eq:krr-closed)
+\end{equation}
+
+Here, $\mathbf{y}$ is the vector of target values, $\mathbf{K}$ is the $n \times n$ kernel matrix of pairwise similarities between data points, and $\lambda$ is a regularization parameter. Once the coefficients $\boldsymbol{\alpha}$ are found, a prediction for a new point $\mathbf{x}_{new}$ is made via $f(\mathbf{x}_{new}) = \sum_{i=1}^n \alpha_i K(\mathbf{x}_i, \mathbf{x}_{new})$.
+
+This formulation decisively shows that, just like SVM, the solution to KRR hinges on the kernel matrix $\mathbf{K}$.
+
+### Scalability Challenges of Kernel Methods
+
+The power of kernel methods like SVM and KRR to model complex, non-linear relationships comes at a steep price. Both methods, as demonstrated, are fundamentally bottlenecked by their reliance on the kernel matrix $\mathbf{K}$, which encodes all pairwise interactions between data points. This dependency, evident in the dual formulations for SVM \@ref(eq:dual-svm-matrix) and KRR \@ref(eq:krr-dual), is the primary barrier to their application on large-scale datasets.
+
+To understand this challenge formally, we can frame the learning problem for most kernel methods within the general theory of Reproducing Kernel Hilbert Spaces (RKHS). The goal is to find a function $f$ within the RKHS ($H$) that minimizes a combination of empirical loss and a regularization term:
+
+\begin{equation}
+\min_{f \in H} \frac{1}{n} \sum_{i=1}^{n} l(f(\mathbf{x}_i), y_i) + \lambda \|f\|^2_H
+(\#eq:rkhs-formulation)
+\end{equation}
+
+Here, $l(\cdot, \cdot)$ is a loss function (e.g., square loss for regression, hinge loss for classification) and $\|f\|^2_H$ is the squared norm in the RKHS, which penalizes model complexity. The Representer Theorem states that the optimal solution to this problem will always take the form of a finite expansion over the training data:
+
+\begin{equation}
+f(\mathbf{x}) = \sum_{i=1}^{n}{\alpha_i K(\mathbf{x},\mathbf{x}_i)}
+(\#eq:kernel-solution)
+\end{equation}
+
+This single theoretical result forms the basis for all of these methods. The general problem in \@ref(eq:rkhs-formulation) becomes a specific algorithm based on the choice of loss function, but the solution for the coefficients $\boldsymbol{\alpha}$ invariably requires the construction of the $n \times n$ kernel matrix:
+
+\begin{equation}
+\mathbf{K}_{nn} = [K(\mathbf{x}_i, \mathbf{x}_j)]_{i,j = 1}^n
+(\#eq:kernel-matrix)
+\end{equation}
+
+This matrix is the source of the severe scalability issues. Its creation and storage demand $O(n^2)$ memory, while solving the associated system for $\boldsymbol{\alpha}$ (via matrix inversion as in \@ref(eq:krr-closed) for KRR, or QP for SVM) requires $O(n^3)$ time in the worst case. For a dataset of $n = 100,000$, storing the kernel matrix in 64-bit precision consumes approximately 74.5 GB of RAM, exceeding the capacity of typical hardware. The subsequent $O(n^3)$ computations, which would take an infeasibly long time.
+
+This computational wall effectively renders exact kernel methods obsolete for the "big data" problems common today. To reconcile the modelling power of kernel methods and the demands of modern datasets, it is necessary to turn to approximation techniques and hardware acceleration.
+
+### Low-Rank Approximation with Nyström
+
+To overcome the prohibitive costs of forming the full kernel matrix $\mathbf{K}_{nn}$, several approximation techniques have been proposed. The most fundamental of these is the Nyström method, which constructs a low-rank approximation of $\mathbf{K}$ by leveraging a small subset of $m$ landmark points from the original dataset, where $m \ll n$. These landmark points can be selected via uniform random sampling, clustering (e.g., $k$-means), or other more sophisticated sampling heuristics.
+
+Instead of computing and storing the full $n \times n$ matrix, the Nyström method only requires two smaller matrices: $\mathbf{K}_{nm}$, the $n \times m$ kernel matrix between all $n$ points and the $m$ landmark points, and $\mathbf{K}_{mm}$, the small $m \times m$ matrix of similarities among the landmark points themselves. The full kernel is then approximated as:
+
+\begin{equation}
+\mathbf{K}_{nn} \approx \tilde{\mathbf{K}} = \mathbf{K}_{nm} \mathbf{K}_{mm}^{-1} \mathbf{K}_{nm}^{\top}
+(\#eq:nystrom-approx)
+\end{equation}
+
+For symmetric kernels such as the RBF kernel, it can be shown that $\mathbf{K}_{mn} = \mathbf{K}_{nm}^{\top}$. This low-rank approximation reduces the memory footprint from $O(n^2)$ to $O(nm + m^2)$, which is approximately $O(nm)$ for $m \ll n$. Computationally, solving the system shifts from an $O(n^3)$ matrix inversion or decomposition to a more manageable $O(nm^2 + m^3)$ cost: $O(nm^2)$ for forming the approximation and $O(m^3)$ for inverting $\mathbf{K}_{mm}$.
+
+By substituting this approximation $\tilde{\mathbf{K}}$ into the KRR problem from \@ref(eq:krr-closed), there is no longer a requirement to solve a massive $n \times n$ system. Instead, we are faced with a new, much smaller and more manageable system to solve for the coefficients $\boldsymbol{\alpha}$:
+  
+\begin{equation}
+\boldsymbol{\alpha} = (\mathbf{K}_{nm}^{\top} \mathbf{K}_{nm} + \lambda \mathbf{K}_{mm})^{-1} \mathbf{K}_{nm}^{\top} \mathbf{y}
+(\#eq:krr-nystrom)
+\end{equation}
+
+The Nyström method is not without its limitations. Its effectiveness hinges on the choice of the landmark points and the value of $m$. In practice, it is shown by [@Rudi2015] that $m$ can be as few as $m = O(\sqrt{n})$, but the choice is often subject to empirical validation and domain knowledge. Nonetheless, its ability to reduce kernel methods' complexity from intractable to practical makes it a cornerstone for modern scalability practices, especially when paired with the efficient iterative solvers discussed next. These advanced solvers bypass the direct matrix inversion shown in \@ref(eq:krr-nystrom), offering a scalable and numerically stable path to a solution.
+
+### Conjugate Gradient and Preconditioning in Falkon
+
+The Nyström method provides an efficient, low-rank approximation of the kernel matrix, $\tilde{\mathbf{K}}$, transforming the original KRR problem into a smaller, more manageable linear system. While one could solve this new system by direct matrix inversion, as in \@ref(eq:krr-nystrom), that approach is often neither the fastest, nor the most numerically stable. State-of-the-art solvers like Falkon instead use a more sophisticated two-part strategy: an iterative solver combined with a powerful preconditioner.
+
+#### Solving Iteratively with CG
+
+Instead of inverting a large matrix directly, we can solve the linear system $\mathbf{A} \boldsymbol{\alpha} = \mathbf{b}$ (where $\mathbf{A} = \tilde{\mathbf{K}} + \lambda \mathbf{I}$ and $\mathbf{b} = \mathbf{y}$) using an iterative method. The Conjugate Gradient (CG) algorithm is ideal for this, as the matrix $\mathbf{A}$ is symmetric and positive definite.
+
+The core of the CG algorithm is a series of matrix-vector products. In each iteration, we must compute $\mathbf{A} \mathbf{v} = (\tilde{\mathbf{K}} + \lambda \mathbf{I}) \mathbf{v}$ for some vector $\mathbf{v}$. The key operation is the product with the Nyström approximation:
+
+\begin{equation}
+\tilde{\mathbf{K}} \mathbf{v} = (\mathbf{K}_{nm} \mathbf{K}_{mm}^{-1} \mathbf{K}_{nm}^{\top}) \mathbf{v}
+(\#eq:krr-nystrom-cg)
+\end{equation}
+
+This is computed efficiently from right to left without forming any large matrices:
+
+1. Compute $\mathbf{v}_1 = \mathbf{K}^{\top}_{nm} \mathbf{v}$.
+2. Solve $\mathbf{K}_{mm} \mathbf{v}_2 = \mathbf{v}_1$ for $v_2$.
+3. Compute $\mathbf{v}_3 = \mathbf{K}_{nm} \mathbf{v}_2$.
+
+The cost of each iteration is dominated by matrix-vector products involving $\mathbf{K}_{nm}$ and is approximately $O(nm)$. As per @meanti2020kernelmethodsroofhandling, for a well-conditioned system, only a few iterations are needed to reach a solution. Specifically, $O(\log{n})$ CG steps are sufficient to achieve optimal statistical bounds.
+
+When using $m = \mathcal{O}(\sqrt{n})$ inducing points, the total computational cost to solve the system and achieve these bounds is $\mathcal{O}(n \sqrt{n} \log{n})$ in time and $\mathcal{O}(n)$ in memory.
+
+#### Taming Ill-Conditioned Systems
+
+Performance of CG is highly dependent on the properties of the system matrix being solved. A challenge with kernel methods specifically is that kernel matrices are often ill-conditioned. This means that their eigenvalues are spread across a wide dynamic range, which can cause the standard CG algorithm to converge extremely slowly, which negates its benefits.
+
+To overcome this, Falkon employs preconditioning. The goal is to find an easily invertible matrix, the preconditioner, which transforms the original problem into an equivalent one that is better behaved. The linear system that arises from the Nyström approximated KRR problem, as discussed in \@ref(eq:krr-nystrom), can be expressed as:
+
+\begin{equation}
+(\mathbf{K}_{nm}^{\top} \mathbf{K}_{nm} + \lambda n \mathbf{K}_{mm}) \boldsymbol{\alpha} = \mathbf{K}_{nm}^{\top} \mathbf{y}
+(\#eq:nystrom-krr-system)
+\end{equation}
+
+Letting $\mathbf{H} = \mathbf{K}_{nm}^{\top} \mathbf{K}_{nm} + \lambda n \mathbf{K}_{mm}$, our goal is to solve $\mathbf{H} \boldsymbol{\alpha} = \mathbf{K}_{nm}^{\top} \mathbf{y}$. The preconditioner selected to address the ill-conditioning of $\mathbf{H}$, must be both effective at improving conditioning and cheap to construct and apply. A naïve preconditioner $\mathbf{P}$ for the Nyström-approximated KRR system might be one that satisfies $\mathbf{P} \mathbf{P}^{\top} = (\mathbf{K}_{nm}^{\top} \mathbf{K}_{nm} + \lambda n \mathbf{K}_{mm})^{-1}$, but computing this is as costly as the original problem, as noted by @meanti2020kernelmethodsroofhandling.
+
+This is where the core insight of Falkon's preconditioner comes into play. To create a practical preconditioner, the Nyström approximation is applied a second time, this time to approximate the expensive $\mathbf{K}_{nm}^{\top} \mathbf{K}_{nm}$ term within the matrix $\mathbf{H}$ as $\approx \frac{n}{m} \mathbf{K}_{mm}^2$. Following @NIPS201705546b0e, the implemented preconditioner in Falkon, denoted $\tilde{\mathbf{P}}$, is constructed from the Cholesky factors of $\mathbf{K}_{mm}$ and a related regularized matrix derived from it. Specifically, the preconditioner is defined as:
+
+\begin{equation}
+\tilde{\mathbf{P}}=\frac{1}{\sqrt{n}}\mathbf{T}^{-1}\mathbf{A}^{-1}
+(\#eq:preconditioner-nystrom)
+\end{equation}
+
+Factors $\mathbf{T}$ and $\mathbf{A}$ are obtained via Cholesky decomposition and given, respectively, by:
+
+\begin{equation}
+\mathbf{T} = \text{chol}(\mathbf{K}_{mm})
+(\#eq:falkon-T-factor)
+\end{equation}
+
+\begin{equation}
+\mathbf{A} = \text{chol}\left(\frac{1}{m} \mathbf{T} \mathbf{T}^{\top}+\lambda \mathbf{I}_m\right)
+(\#eq:falkon-A-factor)
+\end{equation}
+
+The efficient computation and storage of these Cholesky factors, particularly in a memory-constrained GPU environment, are key aspects of Falkon's design, as will be elaborated upon in the discussion of GPU memory optimization. The crucial insight is that operations involving this $\tilde{\mathbf{P}}$ are computationally efficient due to the triangular structure of these Cholesky factors.
+
+By applying this preconditioner, the problem is transformed via a change of variables from the original $\boldsymbol{\alpha}$ to a new vector $\boldsymbol{\beta}$, where $\boldsymbol{\beta} = \tilde{\mathbf{P}}^{-1} \boldsymbol{\alpha}$. The CG algorithm then solves for $\beta$ in a well-conditioned system of the form:
+
+\begin{equation}
+\tilde{\mathbf{P}}^{\top} \mathbf{H} \tilde{\mathbf{P}} \boldsymbol{\beta} = \tilde{\mathbf{P}}^{\top} {\mathbf{K}}^{\top}_{nm} \mathbf{y}
+(\#eq:preconditioned-krr-nystrom)
+\end{equation}
+
+Once the optimal $\boldsymbol{\beta}$ is found, the final solution is recovered by transforming back, $\boldsymbol{\alpha} = \tilde{\mathbf{P}} \boldsymbol{\beta}$. This specific preconditioning strategy is essential for Falkon's performance, as it transforms the ill-conditioned Nyström-approximated system into one that CG can solve rapidly, ensuring fast convergence to an accurate solution.
+
+### GPU-Optimized Kernel Solvers: The Falkon Implementation
+
+Approximation techniques like the Nyström method and iterative solvers such as conjugate gradient reduce memory complexity of Kernel methods from $O(n^2)$ to approximately $O(nm)$ and time complexity from $O(n^3)$ to $O(n m \log{n})$. But even with $m \ll n$, their practical scalability on traditional CPU architectures remains constrained by sequential processing and limited memory bandwidth. GPUs, on the other hand, excel at massively parallel computations and provide significantly higher computational throughput and memory bandwidth, mitigating CPU limitations.
+
+To leverage the power of GPUs, careful implementation tailored to their architecture needs to be made. GPUs thrive on high operational density (i.e., many computations per byte of memory) and low-latency data access. Kernel methods, by design, demand substantial memory due the kernel matrix, yet they exhibit a low density of operations per byte of memory used. This mismatch poses a challenge when adapting them to GPU architectures, and necessitates strategies that maximize parallelism, minimize memory usage, and reduce data transfers between CPU (host) and GPU (device) memory. Naïve implementations of Nyström or CG solvers, while theoretically efficient, may falter on GPUs if they fail to address these constraints, such as limited onboard memory or the overhead of host-device communication.
+
+Recent advancements have addressed these challenges with efficient, GPU-optimized implementations of kernel methods. Notable examples include GPyTorch and GPflow, which come from the Gaussian process literature, ThunderSVM for Support Vector Machines, and EigenPro for GPU-friendly Kernel Ridge Regression updates. Among these, the Falkon algorithm stands out for its ability to process datasets with billions of points efficiently, achieving dramatic speedups without sacrificing model performance. Falkon builds on the Nyström approximation and preconditioned CG solvers, reformulating them to fully exploit GPU capabilities, and serves as a cornerstone for this section's exploration of GPU-optimized strategies. In particular, this section dives into the GPU-specific tricks employed by Falkon, which enable it to scale KRR to massive datasets.
+
+#### Minimizing Memory Footprint
+
+A primary contribution of the Falkon library is its set of strategies for overcoming the memory bottlenecks that have long constrained kernel methods. While the Nyström approximation reduces the problem size from $n$ to $m$, a naïve setup would require storage of the full kernel matrix $\mathbf{K}_{mm}$, the matrix system $\mathbf{H}$, and the preconditioned form $\mathbf{P}^{\top} \mathbf{H} \mathbf{P}$ separately, all of which are $m \times m$ matrices, in addition to the potentially massive $n \times m$ matrix $K_{mn}$. Falkon's memory allocation is instead composed of just one $m \times m$ matrix, a $1 \times m$ vector for $\beta$, and two small buffers.
+
+The Falkon implementation systematically reduces the memory footprint through two main strategies: (i) computing the preconditioner factors in-place using a single memory allocation, and (ii) sidestepping explicit construction of $\mathbf{K}_{nm}$ by processing it in blocks.
+
+##### In-Place Preconditioner Computation
+
+The most significant memory allocation in Falkon is the $m \times m$ matrix required for the preconditioner. The algorithm cleverly reuses only a single pre-allocated $m \times m$ matrix for the entire multi-step calculation of the factors $\mathbf{T}$ and $\mathbf{A}$. The process proceeds as follows:
+
+1. **Compute** $\mathbf{K}_{mm}$: The $m \times m$ kernel matrix of inducing points is computed (typically in blocks on the GPU) and stored directly into a single pre-allocated $m \times m$ matrix.
+2. **First Cholesky Factor** $\mathbf{T}$: Since kernel matrices are symmetric and positive definite, they are perfectly suited for Cholesky decomposition. Falkon performs this decomposition in-place to find the factor $\mathbf{T}$ such that $\mathbf{K}_{mm} = \mathbf{T}^{\top} \mathbf{T}$ (assuming a lower triangular $\mathbf{T}$). The resulting factor $\mathbf{T}$ overwrites the corresponding triangle of $\mathbf{K}_{mm}$ in memory.
+3. **Second Cholesky Factor** $\mathbf{A}$: The same $m \times m$ memory allocation is then reused. The intermediate matrix $\left(\frac{1}{m} \mathbf{T} \mathbf{T}^{\top}+\lambda \mathbf{I}_m\right)$ is computed and stored, leveraging the previously unused opposite triangle of the matrix for storage. An in-place Cholesky decomposition is then performed for this result to find the factor $\mathbf{A}$.
+
+These in-place operations might seem counterintuitive at first, given that reconstructing $K_{mm}$ would then require computing $\mathbf{T} \mathbf{T}^{\top}$. However, the benefit becomes clear once the subsequent use of $\mathbf{T}$ is considered. Specifically, the approximation of the system matrix $H$ in \@ref(eq:preconditioned-krr-nystrom) involves precisely this structure.
+
+\begin{equation}
+\mathbf{H} \approx \frac{n}{m} \mathbf{K}_{mm}^2 + \lambda n \mathbf{K}_{mm} = 
+\frac{n}{m} \mathbf{T} \mathbf{T}^{\top} \mathbf{T} \mathbf{T}^{\top} + \lambda n \mathbf{T} \mathbf{T}^{\top} = 
+n \mathbf{T} (\frac{1}{m} \mathbf{T}^{\top} \mathbf{T} + \lambda \mathbf{I}_m) \mathbf{T}^{\top} = n \mathbf{T} \mathbf{A} \mathbf{A}^{\top} \mathbf{T}^{\top}
+(\#eq:cholesky-krr-nystrom)
+\end{equation}
+
+Here, the inner matrix emerges naturally, capturing both the kernel similarity structure and regularization. This symmetric positive definite matrix itself admits a Cholesky decomposition as in \@ref(eq:falkon-A-factor). Thus, Falkon cleverly uses a single matrix's lower and upper triangles to hold both factor $\mathbf{T}$ and $\mathbf{A}$, effectively reducing memory requirements by nearly half.
+
+##### Block-wise (Out-of-Core) Matrix-Vector Products
+
+The second, and arguably more critical, memory optimization is avoiding the construction of the $n \times m$ kernel matrix, $\mathbf{K}_{nm}$. For large $n$, this matrix would be far too large to store in RAM.
+
+Falkon sidesteps this issue entirely because $\mathbf{K}_{nm}$ is only ever used within matrix-vector products during CG iterations, as in \@ref(eq:krr-nystrom-cg). The implementation treats this as an "out-of-core" operation by splitting the input data $\mathbf{X}$ into smaller batches. The matrix-vector product is then accumulated as follows:
+
+* For each batch of data, transfer it to the GPU.
+* Compute the corresponding kernel sub-matrix on-the-fly on the GPU.
+* Perform the matrix-vector multiplication on the GPU.
+* Accumulate the result and discard the kernel sub-matrix.
+
+Crucially, the computed kernel sub-matrices are never stored in the main memory or transferred back from the GPU, drastically reducing memory usage and host-device communication. This block-wise approach is what allows Falkon to handle a virtually unlimited number of samples, $n$.
+
+#### Out-of-Core (OOC) Operations
+
+The strategies for minimizing RAM usage are crucial, but modern GPU architectures introduce a second, more restrictive memory ceiling: the GPU's own memory (VRAM), which is typically much smaller than the system's main RAM. For instance, a system might have 256GB of RAM, but only 16GB of VRAM per GPU. When the number of inducing points, $m$, is large (e.g., $m = 2 \times 10^5$), the preconditioner matrix alone can occupy over 150GB, making it impossible to store on a single GPU.
+
+To solve this, Falkon implements out-of-core (OOC) operations. OOC algorithms are designed to work with a large storage layer (main RAM) and a smaller but much faster layer (GPU VRAM), processing data in chunks that fit into the fast memory. Falkon provides its own OOC implementations for key linear algebra routines, as they are not standard in common higher-level machine learning libraries like PyTorch. This OOC design is also the foundation for distributing work across multiple GPUs in parallel.
+
+##### Optimized OOC $\mathbf{K}_{nm}$-Vector Multiplication
+
+As established in the previous section, the $\mathbf{K}_{nm}$-vector product is handled in a block-wise manner. The OOC implementation further optimizes this by carefully choosing the block size to maximize the ratio of computation to data transfer time for a given amount of GPU memory. This ensures the GPU spends as much time as possible performing calculations rather than waiting for data from the slower main RAM, maximizing accelerator utilization.
+
+##### OOC Multi-GPU Cholesky Decomposition
+
+A more complex challenge is computing the Cholesky decomposition of the $m \times m$ preconditioner matrix when it is too large for a single GPU's VRAM. Falkon implements a parallel OOC Cholesky algorithm inspired by high-performance computing literature. The high-level process is as follows:
+
+1. **Tiling**: The full matrix in RAM is conceptually split into smaller square tiles that can fit into GPU memory.
+2. **Column-wise Processing**: The algorithm proceeds by finalizing one full column of the final Cholesky factor at a time.
+3. **Parallel Updates**: For each column, the work is distributed across all available GPUs. The update process involves a sequence of operations on the tiles: a standard Cholesky decomposition on the diagonal tile, triangular system solves for the off-diagonal tiles in that column, and finally, using the results to update the rest of the matrix (the "trailing submatrix").
+4 **Inter-GPU Communication**: This parallel process requires data transfers between GPUs.
+
+By implementing these sophisticated OOC routines, Falkon effectively removes GPU VRAM as a hard limit on the problem size, allowing it to scale to a very large number of inducing centres, $m$.
+
+#### Leveraging Reduced-Precision Arithmetic
+
+Beyond managing memory, Falkon achieves significant speedups by carefully managing the numerical precision of its calculations. Modern GPUs are designed to achieve peak performance with lower-precision floating-point numbers. For instance, switching from 64-bit (double precision) to 32-bit (single precision) arithmetic can result in a throughput improvement of up to 10x, depending on the specific GPU architecture.
+
+However, naively switching to 32-bit precision can lead to severe numerical stability issues. @meanti2020kernelmethodsroofhandling highlights a classic example when computing the Gaussian / RBF kernel as in \@ref(eq:rbf-kernel). That depends on the squared norm $\|x-y\|^2$. This is often computed by expanding the norm as $\|x\|^2 - 2 x^{\top}y + \|y\|^2$, but in high dimensions, the squared norm terms can become very large, while the cross-term can be a large negative number. Summing these values in low precision can lead to "catastrophic cancellation", where significant digits are lost. This loss of precision can result in a kernel matrix that is no longer perfectly symmetric positive definite, which would cause the Cholesky decomposition to fail.
+
+To gain the speed of low-precision computation without sacrificing numerical stability, Falkon employs a mixed-precision strategy. For operations like the computation of $\mathbf{K}_{mm}$, the matrix blocks are calculated using 32-bit precision, but the crucial intermediate sums are performed in 64-bit precision to maintain accuracy. The final result is then converted back to 32-bit for storage.
+
+This careful, targeted use of high precision only where it is numerically critical allows Falkon to benefit from the immense speed of 32-bit GPU arithmetic for the vast majority of its computations, while ensuring the robustness and success of the overall algorithm.

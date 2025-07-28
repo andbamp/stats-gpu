@@ -1,0 +1,18 @@
+# macOS system files
+.DS_Store
+
+# PDF files
+*.pdf
+
+# Log files
+*.log
+
+# Tex files
+*.tex
+
+# RStudio
+.Rproj.user
+*.Rproj
+
+# R files
+.Rhistory

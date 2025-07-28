@@ -1,0 +1,315 @@
+## Approximate Kernel Ridge Regression on GPU with Falkon
+
+Section \@ref(kernel-methods) established the theoretical foundations of kernel methods, their inherent scalability limitations, and the algorithmic solutions designed to overcome those bottlenecks, namely the Nyström approximation and preconditioned conjugate gradient (CG) solvers. This section provides a rigorous empirical demonstration of these concepts through a detailed case study of the Falkon library.
+
+### Introduction to the Falkon Library
+
+Falkon is an open-source Python library designed to scale up kernel methods to very large datasets with multi-GPU acceleration. It implements solvers for both approximate Kernel Ridge Regression (KRR), which seeks to solve the optimization problem outlined in \@ref(eq:krr-dual), and Kernel Logistic Regression (KLR). As discussed previously, traditional, exact kernel methods face significant computational bottlenecks due to the need to construct and manipulate the $n \times n$ kernel matrix $\mathbf{K}_{nn}$, leading to $O(n^2)$ memory and $O(n^3)$ time complexities. Falkon addresses these challenges by integrating Nyström approximation with a preconditioned CG solver, implemented on a PyTorch backend to leverage GPU parallelism.
+
+The library's core algorithm centers around approximating the full kernel matrix with a much smaller $n \times m$ matrix based on $m$ Nyström centers (with $m \ll n$), approximating $\mathbf{K}_{nn}$ as in \@ref(eq:nystrom-approx) and effectively reducing the complexity for solving KRR from $O(n^3)$ to roughly $O(n m^2)$. The computationally intensive operations, such as kernel evaluations and the iterative CG solver used to handle the resulting linear system (akin to solving the preconditioned system \@ref(eq:preconditioned-krr-nystrom)), are parallelized on the GPU, leveraging strategies such as out-of-core operations and Falkon's specific memory optimization techniques discussed in the previous chapter. The library can be further accelerated by integrating with KeOps, an efficient C++ library for fast kernel evaluations. This design allows Falkon to handle datasets with millions (or even billions) of points, which would be intractable for exact kernel methods.
+
+### Experimental Setup
+
+#### Software Configuration
+
+To empirically evaluate the performance benefits and practical utility of GPU acceleration for kernel methods via Falkon, a series of benchmarking experiments were designed. The general protocol was outlined in the previous section. The final software configuration for the experiments presented, achieved after addressing initial version incompatibilities, such as NumPy ABI conflicts which required downgrading the default NumPy and PyKeOps installations and pinning to an older version, comprised the following key library versions:
+
+* **Falkon**: 0.8.5
+* **PyTorch**: 2.2.0 (with CUDA 12.1 support)
+* **PyKeOps**: 2.2
+* **Scikit-learn**: 1.6.1
+* **NumPy**: 1.26.4
+* **Pandas**: 2.2.2
+
+#### Implementations Compared
+
+Three distinct implementations were compared:
+
+1. **Falkon (GPU)**: The GPU-accelerated configuration with `use_cpu=False` and `keops_active="yes"`. Float32 precision was used for optimal performance on GPU.
+2. **Falkon (CPU)**: A direct CPU baseline of the same approximate algorithm, with `use_cpu=True` and `keops_active="no"`. Float64 precision was used, as lower floating point precision is not numerically stable on the CPU implementation.
+3. **Scikit-learn `KernelRidge` (CPU)**: A traditional, non-approximated KRR solver serving as a baseline for exact kernel methods.
+
+#### Hyperparameter Configuration
+
+A consistent set of hyperparameters was chosen for all Falkon runs to ensure a fair comparison:
+
+- **Kernel** (`kernel`): Gaussian Kernel (as in \@ref(eq:gaussian-kernel)) with $\sigma = 15.0$ (equivalently corresponding to $\gamma = \frac{1}{2 \sigma^2}$ in \@ref(eq:rbf-kernel) for `KernelRidge`).
+- **Regularization Penalty** (`penalty`): The regularization parameter in the KRR objective (and its Nyström-approximated counterpart in \@ref(eq:krr-nystrom) was set to $\lambda = 1 \times 10^{-6}$.
+- **Number of Nyström Centers** (`M`): To maintain a consistent approximation quality relative to the dataset size, $m$ was set dynamically using the formula $m = \lfloor \log{n} \sqrt{n} \rfloor$, where $n$ is the number of training samples. This heuristic was informed by @meanti2020kernelmethodsroofhandling's claim of model performance at $m = O(\sqrt{n})$, as a slightly more conservative (i.e., higher) sample size.
+- **Maximum Iterations** (`maxiter`): The maximum number of iterations for the CG solver was set to 20.
+
+Note that the experiments were restricted to a specific set of reasonable predictive variables and hyperparameters in order to be able to focus specifically on computational metrics. As such, finding the truly optimal predictive model via cross-validation was outside the scope.
+
+### Benchmark 1: Scalability with Sample Size (*n*)
+
+The primary experiment was designed to measure how each implementation scales as the number of training samples ($n$) increases. The training and prediction times were recorded across stratified subsamples of the **NYC Taxi Fare** dataset, ranging from $1,000$ to $2,000,000$ instances.
+
+#### Execution Time and Resource Consumption
+
+```{r}
+paths_bm1 <- list.files("data/", pattern = "benchmark_falkon_taxi_1", full.names = TRUE)
+fal_bm1 <- rbindlist(lapply(paths_bm1, fread))
+fal_bm1[, run_type := factor(run_type, c("Falkon (GPU)",
+                                         "Falkon (CPU)",
+                                         "Scikit-learn (CPU)"))]
+
+fal_bm1_mp <- merge(
+  unique(fal_bm1[, .(n_samples, m_points, mp = "1")]),
+  unique(fal_bm1[, .(run_type, mp = "1")]),
+  allow.cartesian = TRUE
+)[, -"mp"]
+fal_bm1 <- rbindlist(list(
+  fal_bm1,
+  fal_bm1_mp
+), use.names = TRUE, fill = TRUE)
+fal_bm1 <- fal_bm1[order(n_samples, run_type, na.last = TRUE), head(.SD, 1), by = .(run_type, n_samples)]
+fal_bm1 <- extract_mean_sd(fal_bm1, "train_times")
+fal_bm1 <- extract_mean_sd(fal_bm1, "pred_times")
+
+fal_bm1 <- fal_bm1[, .(
+  n_samples, m_points, run_type, 
+  train_time = train_times_mean, train_sd = train_times_sd,
+  pred_time = pred_times_mean, pred_sd = pred_times_sd,
+  RMSE, R2
+)]
+fal_bm1[!(run_type %like% "Falkon"), m_points := NA]
+```
+
+```{r}
+get_falkon_metrics <- function(dat, size) {
+  get_row <- function(rt) dat[run_type == rt & n_samples == size]
+  
+  cpu <- get_row("Falkon (CPU)")
+  gpu <- get_row("Falkon (GPU)")
+  
+  format_pm <- function(mean, sd) sprintf("%.2f ± %.2f", mean, sd)
+  
+  list(
+    train_cpu = format_pm(cpu$train_time, cpu$train_sd),
+    train_gpu = format_pm(gpu$train_time, gpu$train_sd),
+    train_speedup = sprintf("%.0f", cpu$train_time / gpu$train_time),
+    
+    pred_cpu = format_pm(cpu$pred_time, cpu$pred_sd),
+    pred_gpu = format_pm(gpu$pred_time, gpu$pred_sd),
+    pred_speedup = sprintf("%.0f", cpu$pred_time / gpu$pred_time)
+  )
+}
+
+falkon_20k <- get_falkon_metrics(fal_bm1, 20000)
+falkon_20k_cpu <- falkon_20k$train_cpu
+falkon_20k_gpu <- falkon_20k$train_gpu
+
+falkon_50k <- get_falkon_metrics(fal_bm1, 50000)
+falkon_50k_cpu <- falkon_50k$train_cpu
+falkon_50k_gpu <- falkon_50k$train_gpu
+falkon_50k_speedup <- falkon_50k$train_speedup
+
+falkon_100k <- get_falkon_metrics(fal_bm1, 100000)
+falkon_100k_cpu <- falkon_100k$train_cpu
+falkon_100k_gpu <- falkon_100k$train_gpu
+falkon_100k_speedup <- falkon_100k$train_speedup
+
+falkon_1M <- get_falkon_metrics(fal_bm1, 1000000)
+falkon_1M_gpu <- falkon_1M$train_gpu
+```
+
+The results of the scalability benchmark are summarized in Table \@ref(tab:falkon-bm1-results). It captures the training time, prediction time, Root Mean Squared Error (RMSE) and $R^2$ score for each configuration across various dataset sizes.
+
+```{r falkon-bm1-results, echo=FALSE, warning=FALSE}
+col_headers <- c(
+  "$n$", "$m$", "Implementation",
+  "Train Time (s)", "Pred. Time (s)", "RMSE", "$R^2$"
+)
+
+fal_bm1_table <- fal_bm1[!is.na(train_time)]
+
+fal_bm1_final <- fal_bm1_table[, .(
+  n_samples = format(n_samples, big.mark = ","),
+  m_points,
+  run_type,
+  `Train Time (s)` = sprintf("%.2f ± %.2f", train_time, train_sd),
+  `Pred. Time (s)` = sprintf("%.2f ± %.2f", pred_time, pred_sd),
+  RMSE,
+  R2
+)]
+fal_bm1_final[run_type == "Falkon (GPU)", run_type := "\\textbf{Falkon (GPU)}"]
+
+line_positions <- cumsum(rle(as.character(fal_bm1_final$n_samples))$lengths)
+line_positions <- line_positions[-length(line_positions)]
+
+kable(
+  fal_bm1_final,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = TRUE,
+  col.names = col_headers,
+  align = "rrlrrrr",
+  digits = 4,
+  escape = FALSE,
+  caption = "Scalability Benchmark Results: A comparison of training time (s), prediction time (s), RMSE, and $R^2$ for Falkon (GPU), Falkon (CPU), and Scikit-learn (CPU) across varying sample sizes ($n$) with number of centers $m = \\lfloor \\log{n} \\sqrt{n} \\rfloor$."
+) |>
+  row_spec(line_positions, extra_latex_after = "\\midrule") |>
+  kable_styling(latex_options = "repeat_header")
+```
+
+#### Analysis of Scalability and Speedup Factors
+
+The results in Table \@ref(tab:falkon-bm1-results) and Figure \@ref(fig:falkon-bm1-scalability) clearly demonstrate the performance paradigm shift enabled by GPU acceleration. For small dataset sizes ($n \le 20,000$), the overhead associated with GPU memory transfers and kernel initializations results in the Falkon (CPU) implementation being faster. At $n = 20,000$, the CPU version completes training in `r falkon_20k_cpu` seconds, while the GPU version takes approximately `r falkon_20k_gpu` seconds. This is the expected behavior and highlights that for smaller tasks, a simple CPU approach remains efficient.
+
+However, a critical inflection point occurs around $n = 50,000$. At this size, the GPU-accelerated Falkon becomes dramatically faster, completing training in just `r falkon_50k_gpu` seconds compared to the CPU version's `r falkon_50k_cpu` seconds, yielding a speedup of over `r falkon_50k_speedup` $\times$. This reversal is primarily because the core CG solver, the most computationally intensive part of the algorithm, automatically switches from the CPU-based implementation to the GPU-based one at this scale, as observed in the library's debug logs. This trend highlights the GPU's superior ability to handle the parallelizable matrix-vector multiplications as the data size grows.
+
+The performance gap widens significantly at $n = 100,000$ where the GPU version takes only `r falkon_100k_gpu` seconds compared to the CPU version's `r falkon_100k_cpu` seconds, yielding an approximately `r falkon_100k_speedup` $\times$ speedup. Beyond this point, the Falkon (CPU) implementation became too slow to be practical, and often resulted in memory errors. Meanwhile, the `KernelRidge` baseline failed due to memory errors at just $n = 20,000$. In contrast, the GPU-accelerated Falkon scaled efficiently, successfully training on a dataset of $1,000,000$ samples in just `r falkon_1M_gpu` seconds, a task impossible for the other methods on the given hardware.
+
+```{r falkon-bm1-scalability, fig.cap = "Training time scalability comparison across implementations using a log-scaled y-axis.", fig.width=6.5, fig.height=4.5, out.width="70%", fig.align='center'}
+ggplot(fal_bm1, aes(x = factor(n_samples), y = train_time, fill = run_type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_y_log10() +
+  labs(
+    title = "Scalability of Training Time Across Sample Sizes",
+    subtitle = "Log-scaled comparison of Falkon (GPU), Falkon (CPU), and Scikit-learn (CPU)",
+    x = "Number of Samples (n)",
+    y = "Training Time (seconds, log scale)",
+    fill = "Implementation"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(margin = margin(b = 10))
+  )
+```
+
+Critically, this dramatic acceleration did not compromise model quality. Across all successful runs, the RMSE and $R^2$ scores remained comparable between the GPU and CPU implementations, confirming that the performance gains were achieved without sacrificing predictive performance at $m = \lfloor \log{n} \sqrt{n} \rfloor$.
+
+### Benchmark 2: Accuracy vs. Nyström Centers ($m$)
+
+While the first benchmark established computational scalability, this second experiment assesses the relationship between the number of Nyström centers ($m$) and the model's predictive accuracy. This test is crucial for validating that the Nyström approximation, while efficient, can still yield a high-quality predictive model. The number of training samples was fixed at a large scale of $n = 5,000,000$, while $m$ was varied across a range from approximately $0.1 \sqrt{n}$ to $10 \sqrt{n}$.
+
+#### Overcoming a Data Engineering Bottleneck
+
+Pushing the dataset to a size of $n = 5$ million revealed a critical bottleneck at the current configuration. The initial approach of loading and processing the full source dataset in each iteration of the experiment led to out-of-memory errors. This was note due to a lack of total available RAM, but rather a phenomenon known as memory fragmentation, where the repeated allocation and de-allocation of a multi-GB block of memory prevented the system from finding a contiguous block for subsequent loads. To resolve this, a disk-based caching strategy was implemented: once the final, processed PyTorch tensors were created, they were saved to a file and loaded directly in subsequent runs, enabling stable execution of the large-scale benchmark.
+
+#### Accuracy vs. Number of Centers (*m*)
+
+The results of this benchmark, summarized in Table \@ref(tab:falkon-bm2-results), reveal a nuanced trade-off between the number of inducing points and model performance.
+
+```{r}
+# Load and combine predictions
+pred_paths <- list.files("data/", pattern = "benchmark_falkon_taxi_2", full.names = TRUE)
+fal_m <- rbindlist(lapply(pred_paths, fread))
+
+# Keep one row per m (lowest pred_time, in case of duplicates)
+fal_m <- fal_m[order(m_points), .SD[1], by = m_points]
+
+# Retain relevant columns
+fal_bm2 <- copy(fal_m)
+fal_bm2 <- extract_mean_sd(fal_bm2, "train_times")
+fal_bm2 <- extract_mean_sd(fal_bm2, "pred_times")
+
+fal_m <- fal_m[, .(
+  n_samples, m_points, run_type, 
+  train_time, pred_time, RMSE, R2
+)]
+
+# --- Accuracy trend analysis ---
+
+# Smallest m
+m_small <- min(fal_m$m_points)
+rmse_small <- fal_m[m_points == m_small, RMSE]
+
+# Closest m to sqrt(n)
+sqrt_n <- unique(fal_m$n_samples) |> sqrt() |> as.integer()
+m_sqrt <- fal_m[which.min(abs(m_points - sqrt_n)), m_points]
+rmse_sqrt <- fal_m[m_points == m_sqrt, RMSE]
+
+# Drop from small m to sqrt(n)
+rmse_improvement_pct <- 100 * (rmse_small - rmse_sqrt) / rmse_small
+
+# Best performance overall
+rmse_min <- min(fal_m$RMSE)
+r2_max   <- max(fal_m$R2)
+
+# Format for inline use
+falkon2_small_m      <- sprintf("%.0f", m_small)
+falkon2_small_rmse   <- sprintf("%.2f", rmse_small)
+falkon2_sqrt_n       <- sprintf("%.0f", m_sqrt)
+falkon2_sqrt_rmse    <- sprintf("%.2f", rmse_sqrt)
+falkon2_sqrt_drop    <- sprintf("%.1f", rmse_improvement_pct)
+falkon2_min_rmse     <- sprintf("%.2f", rmse_min)
+falkon2_max_r2       <- sprintf("%.2f", r2_max)
+```
+
+```{r falkon-bm2-results, echo=FALSE, warning=FALSE}
+col_headers <- c(
+  "$n$", "$m$", "Implementation",
+  "Train Time (s)", "Pred. Time (s)", "RMSE", "$R^2$"
+)
+
+# Format columns for better readability
+fal_bm2[run_type == "Falkon (GPU)", run_type := "\\textbf{Falkon (GPU)}"]
+fal_bm2[, n_samples := format(n_samples, big.mark = ",")]
+fal_bm2[, m_points := format(m_points, big.mark = ",")]
+fal_bm2_final <- fal_bm2[, .(
+  n_samples = format(n_samples, big.mark = ","),
+  m_points = format(m_points, big.mark = ","),
+  run_type,
+  `Train Time (s)` = sprintf("%.2f ± %.2f", train_times_mean, train_times_sd),
+  `Pred. Time (s)` = sprintf("%.2f ± %.2f", pred_times_mean, pred_times_sd),
+  RMSE,
+  R2
+)]
+
+kable(
+  fal_bm2_final,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = TRUE,
+  col.names = col_headers,
+  align = "rrlrrrr",
+  digits = 4,
+  escape = FALSE,
+  caption = "Accuracy vs. Nyström Centers: Results from Benchmark 2 showing model accuracy as a function of Nyström centers $m$ with a fixed sample size $n = 5{,}000{,}000$."
+) |>
+  kable_styling(
+    latex_options = c("striped", "repeat_header"),
+    full_width = FALSE,
+    position = "center"
+  )
+```
+
+There is a clear and significant improvement in accuracy as $m$ initially increases. With a very small number of centers ($m =$ `r falkon2_small_m`), the model produces a poor approximation (RMSE of `r falkon2_small_rmse`). However, as $m$ increases towards $\sqrt{n}$ at $m =$ `r falkon2_sqrt_n`, the performance improves dramatically, with the RMSE dropping by over `r falkon2_sqrt_drop`% to `r falkon2_sqrt_rmse`. The model's performance continues to improve, reaching a peach accuracy at approximately $8\sqrt{n}$, where the RMSE is minimized at `r falkon2_min_rmse` and the $R^2$ score is maximized at `r falkon2_max_r2`.
+
+```{r falkon-bm2-accuracy, fig.cap = "Effect of Nyström centers on model accuracy at fixed $n = 5{,}000{,}000$.", fig.width=6.5, fig.height=4.5, out.width="70%", fig.align='center'}
+# Ensure m_points is numeric
+fal_m$m_points <- as.numeric(fal_m$m_points)
+
+ggplot(fal_m, aes(x = m_points, y = RMSE)) +
+  geom_line(size = 1) +
+  geom_point(size = 3, shape = 21, fill = "white") +
+  labs(
+    title = "Accuracy vs. Number of Nyström Centers",
+    subtitle = "RMSE as a function of m with fixed n = 5,000,000",
+    x = "Number of Nyström Centers (m)",
+    y = "Root Mean Squared Error (RMSE)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(margin = margin(b = 10))
+  )
+```
+
+Interestingly, increasing $m$ beyond this point does not necessarily yield further improvements. As observed in Figure \@ref(fig:falkon-bm2-accuracy), the performance effectively plateaus and fluctuates within a high-accuracy band. This behavior suggests that the model is approaching a practical limit, likely due to the onset of numerical instability. As the matrix of Nyström centers becomes very large, its Cholesky decomposition, a key step in calculating the preconditioner, can become ill-conditioned when performed with single-precision (Float32) arithmetic on the GPU. This can lead to small numerical errors that prevent the solver from converging to a marginally better solution, even with a theoretically better approximation.
+
+This finding empirically validates that while a larger $m$ is generally better, there is a point of diminishing returns where the theoretical benefit is offset by the practical limitations of hardware precision. It also underlines the importance of validating nuanced hardware limits and adjusting settings accordingly.
+
+### Discussion
+
+The benchmarks from the NYC Taxi Fare Prediction task provide compelling evidence for the thesis's central argument. Falkon, by combining the Nyström approximation with a GPU-optimized iterative solver, effectively bridges the gap between the high predictive power of kernel methods and the computational demands of large-scale datasets.
+
+The scalability analysis unequivocally demonstrates the practical limits of traditional and CPU-based methods, while highlighting the dramatic speedup (over $50\times$ in some cases) and superior scalability of the GPU-accelerated implementation. This enables the analysis of datasets that are orders of magnitude larger than previously feasible on comparable hardware.
+
+Furthermore, the investigation into the number of Nyström centers ($m$) provides a crucial practical insight. The results confirm that $m$ is a key hyperparameter that governs a trade-off between computational cost and predictive accuracy. While increasing $m$ initially leads to substantial gains, the experiment reveals a performance plateau, likely due to numerical precision limits on the GPU. This finding suggests that an optimal number of centers often exists that maximizes accuracy without incurring unnecessary computational cost or risking numerical instability.

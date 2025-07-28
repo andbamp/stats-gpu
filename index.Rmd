@@ -1,0 +1,52 @@
+---
+# title: "COMPUTATIONAL STATISTICS AND GPU ACCELERATION"
+# author: "ANDREAS S. BAMPOURIS"
+# date: "July 2025"
+site: "bookdown::bookdown_site"
+documentclass: book
+classoption: "twoside"
+fontsize: 12pt
+linestretch: 1.5
+mainfont: "Times New Roman"
+bibliography: bibliography.bib
+biblio-style: agsm
+link-citations: yes
+geometry: "left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm"
+output:
+  bookdown::pdf_book:
+    includes:
+      before_body: titlepage.tex
+    toc_depth: 3
+---
+
+\tableofcontents
+\listoftables
+\listoffigures
+
+\mainmatter
+
+```{r setup, include=FALSE}
+# This chunk runs first, setting options for all following chapters.
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+
+library(knitr)
+library(data.table)
+library(magrittr)
+library(ggplot2)
+library(kableExtra)
+
+# Make your custom function available globally
+extract_mean_sd <- function(dat, col) {
+  dat[, (col) := gsub("\\[|\\]", "", get(col))]
+  stats <- lapply(strsplit(dat[[col]], ","), function(x) {
+    x <- as.numeric(x)
+    list(mean = mean(x), sd = sd(x))
+  })
+  stats_dt <- data.table::rbindlist(stats)
+  dat[, paste0(col, "_mean") := stats_dt$mean]
+  dat[, paste0(col, "_sd") := stats_dt$sd]
+  return(dat)
+}
+```

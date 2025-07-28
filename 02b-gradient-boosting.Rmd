@@ -1,0 +1,459 @@
+## Accelerating XGBoost with GPU Histograms
+
+The landscape of supervised learning has been shaped profoundly by the advent of powerful ensemble techniques, with the gradient boosting framework emerging as a particularly robust and effective methodology. At the forefront of this evolution is XGBoost, a system whose name has become synonymous with state-of-the-art performance. Introduced by @Chen2016, XGBoost represents a highly optimized and scalable implementation of gradient boosting that is the consensus choice for winning solutions in a wide array of classification and regression challenges, from classifying high-energy physics events to predicting store sales and customer behavior. Its success stems from a principled approach to model building that incorporates sophisticated regularization to prevent overfitting and leverages novel algorithms for computational efficiency.
+
+However, XGBoost's predictive power presents a fundamental paradox: the very process that makes the model so effective is also its greatest computational liability. The sequential construction of decision trees at the core of the algorithm is fundamentally bottlenecked by an expensive, exhaustive search for the optimal splits at each node. For large-scale datasets, this search becomes a computational wall, turning training from a matter of minutes into hours or even days. This high cost is further compounded by the practical need for extensive hyperparameter tuning, where models must be retrained repeatedly, making raw computational speed a critical limiting factor for practitioners.
+
+This chapter argues that surmounting this paradox required a crucial, two-stage evolution that effectively links statistical theory and high-performance hardware. We will first dissect the theoretical formulation of XGBoost to reveal precisely how its regularized, second-order objective leads to the demanding split-finding computation. We will then analyze the first of its key innovations: a fundamental algorithmic leap on CPU architectures, which replaced the exhaustive sorting-based search with a highly efficient histogram aggregation method. Then, we will demonstrate how this algorithmic shift inadvertedly created a new computational profile that is perfectly suited for the massively parallel, high-throughput architecture of the GPU, and how a subsequent architectural co-design by @Mitchell2017 leveraged this synergy to achieve dramatic acceleration, transforming XGBoost into a truly scalable tool for modern computational statistics.
+
+### From Decision Trees to Gradient Boosting
+
+To establish the context for its design, we will first trace the lineage of XGBoost from its foundational concepts, decision trees and the gradient boosting framework.
+
+#### Decision Tree as a Base Learner
+
+Decision trees are a versatile class of non-parametric supervised learning models that recursively partition the feature space into a set of disjoint, axis-aligned regions [@Hastie2009, Chapter 9]. Their hierarchical structure, which resembles an inverted tree, facilitates interpretable decision-making for both classification and regression tasks. Given a dataset $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i = 1}^{n}$, where $\mathbf{x}_i \in \mathbb{R}^p$ is a $p$-dimensional feature vector and $y_i$ is the target variable, a decision tree is constructed by iteratively selecting the "best" split for the instances at the current node.
+
+```{r decision-tree-example, echo=FALSE, fig.cap="A decision tree derived from the 'Play Golf' dataset. The model recursively splits the data based on predictor features like 'Outlook' to classify the outcome.", fig.align='center', out.width="80%"}
+knitr::include_graphics("img/chapter_2/decision_tree.png")
+```
+
+Each internal node in the tree represents a test on a single feature $x_j$ (with $j \in \{ 1, \dots, p \}$) against a threshold $\tau \in \mathbb{R}$. An observation $\mathbf{x}_i$ traverses the tree from the root node, and at each internal node, if $x_{ij} \le \tau$, it proceeds to the left child node $R_{t_L}$; otherwise, it proceeds to the right child node $R_{t_R}$. This process continues until a terminal node, called a *leaf*, is reached. All observations falling into the same leaf region $R_m$ are assigned a common prediction value. For regression, that is typically the mean of the $y_i$ values in $R_m$, while for classification, it is the majority class.
+
+The key question in tree construction is how to determine the "best" split. Algorithms most typically select the split that maximizes the reduction in an impurity measure, $H(R_t)$, after partitioning a node $t$. Common impurity measures include:
+
+* **Gini Index (Classification)**: Measures the probability of misclassifying a randomly chosen element if it were randomly labeled according to the distribution of labels in the subset. For a region $R_t$ with $K$ classes and $\hat{p}_{t,k}$ representing the proportion of class $k$ observations:
+
+\begin{equation}
+H(R_t) = \sum_{k=1}^{K} \hat{p}_{t,k}(1 - \hat{p}_{t, k})
+(\#eq:gini-index)
+\end{equation}
+
+* **Entropy (Classification)**: Quantifies the uncertainty in the class labels within the region. This measure uses the concept of Shannon's entropy and is the fundamental component of deviance, a statistical metric of model fit derived from the log-likelihood. Using the same conventions as the Gini index:
+
+\begin{equation}
+H(R_t) = -\sum_{k=1}^K \hat{p}_{t,k} \log_2 \hat{p}_{t,k}
+(\#eq:cross-entropy)
+\end{equation}
+
+* **Mean Squared Error (MSE) (Regression)**: For regression tasks, the impurity of a node is measured by the variance of the target variable. Minimizing node variance is equivalent to minimizing MSE relative to the node's mean. For a region $R_t$ with mean target value $\bar{y}_t = \frac{1}{|R_t|} \sum_{\mathbf{x}_i \in R_t} y_i$:
+
+\begin{equation}
+H(R_t) = \frac{1}{|R_t|} \sum_{\mathbf{x}_i \in R_t} (y_i - \bar{y}_t)^2
+(\#eq:impurity-variance)
+\end{equation}
+
+Considering $|R_t|$ as the number of observations in $R_t$, the impurity reduction, or **Gain**, from splitting region $R_t$ into left child $R_{t_L}$ and right child $R_{t_R}$ is defined as:
+
+\begin{equation}
+\Delta H = H(R_t) - \frac{|R_{t_L}|}{|R_t|} H(R_{t_L}) - \frac{|R_{t_R}|}{|R_t|} H(R_{t_R})
+(\#eq:impurity-reduction)
+\end{equation}
+
+Algorithms in classical implementations, such as CART (Classification and Regression Trees) by @Breiman1984 employ a greedy approach, searching over all possible features and split points (i.e., all $(j, \tau)$) to maximize this Gain. The recursive partitioning continues until a stopping criterion is met, such as a minimum number of observations per leaf ($|R_t| < n_{\text{min}}$), a maximum tree depth ($d_t \geq d_{\text{max}}$), or negligible impurity reduction ($\Delta H < \epsilon$). For each node, finding the optimal split on a continuous feature requires first sorting the data, an operation with a complexity of $O(n_N \log{n_N})$, where $n_N$ is the number of instances in the node. This process, repeated for all $p$ features, establishes the high baseline cost of tree construction, making this greedy search the source of the method's primary computational bottleneck.
+
+While interpretable, individual decision trees are prone to high variance, meaning that small changes in the training data can lead to significantly different tree structures and predictions. They can also easily overfit by creating overly complex trees that capture noise in the data. Although pruning techniques can mitigate overfitting, these foundational limitations of stability and accuracy have motivated the development of ensemble methods.
+
+#### Ensemble Methods and Tree Boosting
+
+The foundational limitations of single decision trees, namely their high variance and tendency to overfit, motivated the development of ensemble learning. These techniques combine multiple "weak" learners, such as a single decision tree, to create a "strong" learner with improved predictive performance and robustness [@Hastie2009, Chapter 16]. The core idea is to leverage the diversity among individual models to reduce variance (as in *bagging*), bias (as in *boosting*), or both.
+
+**Bagging** (or *Bootstrap Aggregating*) involves training multiple independent models, typically of the same type (e.g., decision trees), on different bootstrap samples (generally, random samples with replacement) of the training data. Predictions from these models are then aggregated, usually by averaging for regression or majority voting for classification. Random Forests, introduced by @Breiman2001, extend bagging by also randomly selecting a subset of features at each split in the tree construction process, further decorrelating the trees and reducing the ensemble's variance.
+
+**Boosting**, in contrast, builds models sequentially. Each new model attempts to correct the errors made by the ensemble of previously trained models. Early boosting algorithms like AdaBoost by @Freund1997 iteratively re-weighted misclassified training instances, forcing subsequent learners to focus on these "harder" examples. *Tree Boosting* specifically applies this sequential error-correction principle using decision trees as the base learners.
+
+Given $M$ decision trees in total, where $h_m (\mathbf{x})$ is the prediction of the $m$-th tree, and $\beta_m$ is its weight, the final prediction is a weighted sum of the predictions from all trees in the ensemble:
+
+\begin{equation}
+F(\mathbf{x}) = \sum_{m = 1}^{M} \beta_m h_m (\mathbf{x})
+(\#eq:tree-boosting)
+\end{equation}
+
+While highly effective at reducing bias, this sequential methodology introduces a significant computational burder not present in parallel methods. The total training time is not merely the cost of building $M$ trees, but the cost of building them in a strict, dependent sequence where the construction of tree $m$ cannot begin until tree $m - 1$ is complete. This sequential dependency, combined with the expensive greedy search required to build each individual tree, creates a formidable computational challenge that necessitates the algorithmic optimizations at the heart of modern boosting systems.
+
+#### Gradient Boosting as Functional Gradient Descent
+
+Gradient Boosting [*Machines*] (*GBM*), introduced by @Friedman2001, generalizes boosting to arbitrary differentiable loss functions. It reframes the boosting process as a numerical optimization in function space, where the goal is to find a function $F(\mathbf{x})$ that minimizes the expected value of a chosen loss function $L(y, \hat{y})$. This is achieved by iteratively adding new weak learners (trees) that move the ensemble prediction in the direction of the negative gradient of the loss function, analogous to gradient descent in parameter space.
+
+Formally, given a dataset $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i = 1}^{n}$, where $\mathbf{x}_i \in \mathbb{R}^p$ is a $p$-dimensional feature vector and $y_i$ is the target variable, as well as a differentiable loss function $L(y, \hat{y})$, the algorithm begins by setting a constant model $F_0 (\mathbf{x}) = \arg \min_\gamma \sum^n_{i=1} L(y_i, \gamma)$. For example, the initial prediction may be the mean of $y_i$ for MSE loss. Then, for each iteration $m = 1, \dots, M$ the algorithm performs the following steps:
+
+**1. Compute pseudo-residuals:** Calculate the negative gradient of the loss with respect to the current model's predictions for each observation $i = 1, \dots, n$:
+
+\begin{equation}
+r_{im} = - \left[ \frac {\partial{L(y_i, F(\mathbf{x_i}))}}{\partial F(\mathbf{x}_i)} \right]_{F(\mathbf{x}) = F_{m-1}(\mathbf{x})}
+(\#eq:pseudo-residuals)
+\end{equation}
+
+These pseudo-residuals represent the direction in which the prediction for observation $i$ should be adjusted to best reduce the loss. They are termed *pseudo* because for arbitrary loss functions they are not the true residuals $y_i - F_{m-1} (\mathbf{x}_i)$. Instead, they act as the negative gradient components, indicating the direction of steepest descent for the loss function with respect to the current prediction $F_{m-1} (\mathbf{x}_i)$. For MSE loss, $L(y, F) = \frac{1}{2} (y - F)^2$, the pseudo-residual is, indeed, simply $y_i - F_{m-1} (\mathbf{x}_i)$, the ordinary residual.
+
+**2. Fit a decision tree:** Train a new decision tree, $h_m (\mathbf{x})$, by fitting it to these pseudo-residuals $\{(\mathbf{x}_i, r_{im})\}_{i=1}^n$ using the tree construction process outlined in the previous section. The tree partitions the feature space to minimize the impurity of the residuals.
+
+**3. Update the model:** Add the new tree to the ensemble, scaled by a learning rate $\eta \in (0, 1]$:
+
+\begin{equation}
+F_m (\mathbf{x}) = F_{m - 1} (\mathbf{x}) + \eta h_m (\mathbf{x}).
+(\#eq:gradient-boosting)
+\end{equation}
+
+The learning rate $\eta$ replaces the more general weight $\beta_m$ seen in \@ref(eq:tree-boosting). It introduces *shrinkage*, meaning that it reduces the contribution of each tree and helps to prevent overfitting. This often necessitates more trees ($M$) to reach convergence, but typically results in a better-generalized model. Notably, this update step is directly parallel to the parameter update in traditional gradient descent as seen in Table \@ref(tab:gd-gb-analogy).
+
+```{r gd-gb-analogy, echo=FALSE}
+concept_col <- c(
+  "\\textbf{Goal}",
+  "\\textbf{Object}",
+  "\\textbf{Direction}",
+  "\\textbf{Step}",
+  "\\textbf{Update}"
+)
+
+gd_col <- c(
+  "Minimize loss $L(\\theta)$",
+  "Parameters, $\\theta$",
+  "Negative gradient, $-\\nabla_{\\theta}L$",
+  "Scaled gradient vector",
+  "$\\theta_m = \\theta_{m-1} - \\eta\\nabla L$"
+)
+
+gb_col <- c(
+  "Minimize loss $L(y, F(\\mathbf{x}))$",
+  "Function, $F(\\mathbf{x})$",
+  "Pseudo-residuals, $r_{im}$",
+  "Weak learner, $h_m(\\mathbf{x})$",
+  "$F_m = F_{m-1} + \\eta h_m(\\mathbf{x})$"
+)
+
+# Combine into a data.frame
+analogy_df <- data.frame(
+  Concept = concept_col,
+  `Gradient Descent` = gd_col,
+  `Gradient Boosting` = gb_col,
+  check.names = FALSE
+)
+
+kable(
+  analogy_df,
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE,
+  col.names = c(
+    "Concept",
+    "Gradient Descent (Parameter Space)",
+    "Gradient Boosting (Function Space)"
+  ),
+  align = "l",
+  caption = "Analogy between Gradient Descent in parameter space and Gradient Boosting in function space."
+) |>
+  kable_styling(
+    latex_options = c("striped", "hold_position"),
+    font_size = 10
+  ) |>
+  column_spec(1, bold = TRUE, width = "3cm") |>
+  column_spec(2:3, width = "5.5cm")
+```
+
+The iterative process of fitting trees to pseudo-residuals allows gradient boosting to effectively minimize a wide variety of loss function, making it applicable to regression, classification, and ranking problems. However, this statistical elegance comes with compound computational burden. The framework inherits the expensive, sort-based greedy search required to evaluate potential splits within the inner loop of each tree's construction, layered upon which is the strict sequential fitting of hundreds or thousands of trees in the outer loop of the boosting process. Additionally, the method's sensitivity to hyperparameters often necessitates that this entire, demanding procedure be repeated many times during model tuning. These combined limitations underscore the need for an optimized implementation that improves scalability and regularization, setting the stage for the specific algorithmic and systematic innovations introduced by XGBoost.
+
+### XGBoost Formulation and Computational Challenges
+
+XGBoost (eXtreme Gradient Boosting), introduced by @Chen2016, is a highly optimized implementation of gradient boosting. It extends the gradient boosting framework through a number of innovations and manages to capture complex, non-linear patterns in data, making it robust for tasks where traditional linear models may fail. The performance gap between a well-tuned XGBoost model and more complex ensembles, often involving sophisticated models like deep neural networks, is observed to be small. It is popular in a wide range of real-world applications and appears among the top contenders across academic competitions and industrial benchmarks.
+
+The power of XGBoost stems from a principled approach that combines sophisticated regularization techniques, novel algorithms for tree construction, and an end-to-end system-level design to achieve remarkable efficiency and scalability. The core components of this architecture are:
+
+1. **A Regularized, Second-Order Learning Objective**: XGBoost optimizes a unique objective function that directly penalizes model complexity using L1 and L2 terms. Unlike traditional methods that use only the gradient, it leverages a second-order Taylor expansion to incorporate both gradient and Hessian information, often leading to more accurate and rapid convergence.
+2. **Fast, Sophisticated Split-Finding Algorithms**: To solve the primary computational bottleneck of finding splits, XGBoost introduces two techniques: a *Weighted Quantile Sketch*, which replaces the costly, sort-based exact search with a faster, approximate, percentile-based approach, and a *Histogram Algorithm*, which bins feature values to scan aggregated statistics. The latter is XGBoost's key innovation for scalability.
+3. **Sparsity-Awareness for Real World Data**: The framework handles missing values intelligently with a sparsity-aware split-finding algorithm. Instead of requiring imputation the model learns an optimal path for missing entries during training, improving both efficiency and model performance on sparse, real-world datasets.
+4. **System Optimizations for Scalability**: To handle massive datasets, XGBoost is engineered with specific system optimizations. These include *Column Blocks* (i.e., column-major, cache-friendly blocks) for parallel data processing, *Cache-Aware Access* patterns to maximize hardware throughput, and *Out-of-Core Computation* for datasets that cannot fit into memory.
+
+These components work in concert to create a high-performance system. The first and most foundational of these innovation is the objective function itself, which explicitly defines the statistical problem that the entire system is built to solve.
+
+#### Regularized, Second-Order Learning Objective
+
+A key innovation in XGBoost is that it explicitly balances model fit with model complexity to prevent overfitting and enhance generalization. While traditional gradient boosting methods rely primarily on shrinkage (via learning rate $\eta$) and early stopping, XGBoost integrates complexity control directly into the objective function minimized at each step of the tree building process.
+
+Recall that tree ensemble methods build an additive model as in \@ref(eq:tree-boosting), where $h_m (\mathbf{x})$ represents the $m$-th tree. XGBoost seeks to determine the function $h_m$ at each iteration by optimizing an objective function that considers both the training loss and penalty for the complexity of the new tree. The objective function at iteration $m$ is given by:
+
+\begin{equation}
+\mathcal{L}^{(m)} = \sum_{i = 1}^{n} L(y_i, F_{m-1} (\mathbf{x}_i) + h_m(\mathbf{x}_i)) + \Omega(h_m)
+(\#eq:regularized-objective)
+\end{equation}
+
+Here, $L$ is a differentiable convex loss function, which may be squared error for regression or log-loss for classification, and $\Omega(h_m)$ is a regularization term that penalizes the complexity of the newly added tree $h_m$. This term is most typically defined as:
+
+\begin{equation}
+\Omega(h_m) = \gamma T + \frac{1}{2} \lambda \sum^T_{j=1} w_j^2
+(\#eq:regularization-term)
+\end{equation}
+
+In this expression, $T$ is the number of leaves in the tree $h_m$ and $w_j$ is the score assigned to the $j$-th leaf, representing the prediction for instances in that leaf. Hyperparameter $\lambda$ is an L2 regularization parameter that shrinks leaf weights towards zero, akin to ridge regression. The parameter $\gamma$ penalizes the number of leaves, which encourages trees with fewer leaves and acts as a form of pre-pruning. XGBoost may also optionally add a hyperparameter $\alpha$ that adds an L1 penalty term, $\alpha \sum_{j=1}^{T}{|w_j|}$, akin to lasso regression. This is less commonly emphasized, as the L1 parameter is often set to zero in practice [@Mitchell2017].
+
+To optimize this objective, XGBoost employs a second-order Taylor expansion of the loss function around the current prediction $F_{m-1} (\mathbf{x}_i)$. Let $g_i = \partial_{F_{m-1}} L (y_i, F_{m-1} (\mathbf{x}_i))$ be the first-order gradient (i.e., the pseudo-residual in \@ref(eq:pseudo-residuals)) and $h_i = \partial^2_{F_{m-1}} L (y_i, F_{m-1} (\mathbf{x}_i))$ be the second-order gradient (the Hessian). The objective function at iteration $m$, ignoring constants, can then be approximated as:
+
+\begin{equation}
+\mathcal{L}^{(m)} \approx \sum_{i = 1}^{n} [g_i h_m (\mathbf{x}_i) + \frac{1}{2} h_i h_m^2 (\mathbf{x}_i)] + \Omega(h_m)
+(\#eq:regularized-objective-taylor)
+\end{equation}
+
+Let $I_j = \{ i \mid q(\mathbf{x}_i) = j \}$ be the set of indices assigned into the $j$-th leaf by the tree structure $q(\mathbf{x})$. Since all instances in a leaf receive the same score, $h_m(\mathbf{x}_i) = w_{q(\mathbf{x}_i)}$, the objective can be rewritten by summing over the leaves:
+
+\begin{equation}
+\mathcal{L}^{(m)} \approx \sum_{j = 1}^{T} \left[ \left( \sum_{i \in I_j}{g_i} \right) w_j + \frac{1}{2} \left( \sum_{i \in I_j}{h_i} + \lambda \right) w_j^2 \right] + \gamma T
+(\#eq:regularized-objective-score)
+\end{equation}
+
+For a fixed tree structure $q(\mathbf{x})$, this is a simple quadratic in terms of the leaf weights $w_j$. The optimal weight $w_j^*$ for each leaf can be found by setting the derivative with respect to $w_j$ to zero:
+
+\begin{equation}
+w_j^* = - \frac{\sum_{i \in I_j}{g_i}}{\sum_{i \in I_j}{h_i} + \lambda}
+(\#eq:leaf-score)
+\end{equation}
+
+At this point, it is worth remembering that the value of $g_i$ and $h_i$ depends on the loss function being used. For example, for the simple case of Mean Square Error regression, where the Hessians ($h_i$) are all $1$ and the gradients ($g_i$) are equal to the residuals, \@ref(eq:leaf-score) simplifies to the average of the residuals in the leaf, regularized by $\lambda$. Substituting $w_j^*$ back into the objective function yields the final score for a given tree structure $q$:
+
+\begin{equation}
+\mathcal{L}^{(m)}(q) = - \frac{1}{2} \sum^{T}_{j=1} \frac{ \left( \sum_{i \in I_j}{g_i} \right)^2}{\sum_{i \in I_j}{h_i} + \lambda} + \gamma T
+(\#eq:objective-tree-structure)
+\end{equation}
+
+This score measures the quality of a potential tree structure $q$. Conceptually, each term in the sum can be seen as a "purity" or "similarity" score for a leaf, rewarding homogeneity among the gradients within it. The goal of the tree construction algorithm is to find the tree structure that minimizes this score (or maximizes its negative). The use of the Hessian ($h_i$) provides more information about the curvature of the loss function, making the optimization analogous to Newton's method and potentially leading to faster convergence and better model fit than first-order methods.
+
+In addition to this objective-based regularization, XGBoost also employs shrinkage and column subsampling. Shrinkage scales the contribution of each newly added tree by a learning rate $\eta$ as in \@ref(eq:gradient-boosting), reducing the influence of individual trees and allowing future trees to improve the model. Column subsampling, inspired by Random Forests from @Breiman2001, involves using only a random subset of features when constructing each tree, which further helps prevent overfitting and speeds up computation.
+
+#### Split-Finding Criterion and the Computational Wall
+
+The sophisticated statistical goal of the model is transformed into a difficult discrete optimization problem: finding the tree structure $q$ that minimizes \@ref(eq:objective-tree-structure). The construction of each decision tree $h_m (\mathbf{x})$ within the ensemble is performed greedily, a strategy similar to the recursive partitioning used in classical decision trees like CART. However, while traditional trees maximize the reduction in an impurity measure such as the Gini Index or Entropy (as in \@ref(eq:impurity-reduction)), XGBoost selects splits that maximize the reduction to the regularized objective function, $\mathcal{L}^{(m)}(q)$, defined in Equation \@ref(eq:objective-tree-structure). As in traditional trees, this maximized reduction is termed the **Gain**.
+
+To translate this principle into a practical criterion, the gain of a potential split is calculated as the improvement in the objective's quality score, penalized by the complexity cost of adding a new leaf. Formally, consider a leaf node $I$ that we are attempting to split. The score of the current node, if left unsplit, is given by:
+
+\begin{equation}
+\mathcal{L}_\text{parent} = - \frac{1}{2} \frac{ \left( \sum_{i \in I}{g_i} \right)^2}{\sum_{i \in I}{h_i} + \lambda} + \gamma
+(\#eq:score-unsplit)
+\end{equation}
+
+If the node is split into a left child $I_L$ and a right child $I_R$, the total objective score is now the sum of the scores for these two new leaves:
+
+\begin{equation}
+\mathcal{L}_\text{children} = \left( - \frac{1}{2} \frac{ \left( \sum_{i \in I_L}{g_i} \right)^2}{\sum_{i \in I_L}{h_i} + \lambda} + \gamma \right) + \left( - \frac{1}{2} \frac{ \left( \sum_{i \in I_R}{g_i} \right)^2}{\sum_{i \in I_R}{h_i} + \lambda} + \gamma \right)
+(\#eq:score-split)
+\end{equation}
+
+As such, the gain from this split is the reduction in the objective function achieved by replacing the single unsplit leaf with the two newly split leaves. Thus, $\text{Gain} = \mathcal{L}_\text{parent} - \mathcal{L}_\text{children}$ post-split turns out to be:
+
+\begin{equation}
+\text{Gain} = \frac{1}{2} \left[ \frac{\left( \sum_{i \in I_L} g_i \right)^2}{\sum_{i \in I_L} h_i + \lambda} + \frac{\left( \sum_{i \in I_R} g_i \right)^2}{\sum_{i \in I_R} h_i + \lambda} - \frac{\left( \sum_{i \in I} g_i \right)^2}{\sum_{i \in I} h_i + \lambda} \right] - \gamma
+(\#eq:xgboost-gain)
+\end{equation}
+
+The term $\gamma$ in this gain formula effectively represents the penalty for adding an additional leaf to the tree. If the calculated gain does not exceed this $\gamma$ threshold, the split is not performed. This acts as a pre-pruning mechanism, as explained in the context of \@ref(eq:regularization-term), and is integrated within the tree construction stage as opposed to post-pruning, which removes branches after building the tree.
+
+This Gain formula provides a clear, qualitative criterion for every potential split. The central computational task of the tree-building process, therefore, becomes a search problem: for every node, the algorithm must find the feature and split points that yield the maximum possible gain.
+
+The most direct strategy for solving this problem is the  **Exact Greedy Algorithm**. This method performs an exhaustive search over all possible split points for every feature. For each continuous feature, the algorithm first sorts the instances in the current node according to their values. It then performs a single linear scan through this sorted data, evaluating every unique value as a potential split threshold. At each candidate split, the running sum of gradients ($g_i$) and Hessians ($h_i$) for the resulting left and right partitions are used to calculate Gain via Equation \@ref(eq:xgboost-gain).
+
+While this approach is exhaustive and guarantees finding the best split according to the objective function, its computational cost is significant. The complexity is dominated by the sorting operation, resulting in a cost of $O(p \cdot n_N \cdot \log{n_N})$ for a node containing $n_N$ instances and $p$ features. This high cost renders the exact algorithm impractical for the large-scale datasets common in modern applications and establishes it as the definitive computational wall. This reliance on an irregular, data-dependent operation is the central bottleneck that more scalable, approximate methods are designed to solve.
+
+### From Exact Search to Histogram Aggregation
+
+The practical utility of any powerful statistical model is ultimately constrained by its computational feasibility on large-scale data. As established, the sort-based exact greedy algorithm, while statistically sound, confronts a "computational wall" due to its reliance on an expensive, data-dependent sorting operation at every node. Overcoming this barrier required a fundamental shift in strategy within XGBoost's design, moving away from the exhaustive search for the optimal split towards efficient and principled approximation. This section details this crucial algorithmic leap, which forms the first bridge to scalability, beginning with the introduction of the approximate framework and culminating in the highly optimized histogram method that redefines the problem's computational character.
+
+#### Approximate Algorithm and Weighted Quantile Sketch
+
+To address the performance limitations of the exact greedy algorithm, XGBoost employs a highly effective **approximate framework**. Instead of enumerating every unique feature value, this approach considers only a limited set of candidate split points proposed according to the percentiles of the feature distribution. This significantly reduces the computational burden while maintaining high predictive accuracy.
+
+The core innovation that powers this framework is the **Weighted Quantile Sketch**. This is a novel algorithm for proposing candidate split points that are not uniformly distributed across a feature's range, but are instead concentrated in regions where the objective function is most sensitive. To achieve this, the algorithm uses the Hessians ($h_i$) as per-instance weights. The rationale is derived directly from the Taylor-approximated objective function in Equation \@ref(eq:regularized-objective-taylor), which can be viewed as a weighted squared loss with labels $- g_i / h_i$ and weights $h_i$. The Hessian defines the curvature of the loss for a given instance, meaning that a larger $h_i$ implies that the overall loss in more sensitive to changes in that instance's prediction. By weighting instances by their Hessians, the sketch proposes more candidate splits in areas of the feature space that have a greater impact on the objective, allowing for a more refined search where it matters most.
+
+Formally, for a given feature $k$, the algorithm defines a rank function $r_k : \mathbb{R} \rightarrow [0, 1)$ over the dataset $\mathcal{D}_k = \{(x_{ik}, h_i)\}_{i = 1}^{n}$. This function calculates the weighted proportion of instances whose feature value is less than a certain point $z$:
+
+\begin{equation}
+r_k(z) = \frac{1}{\sum_{(x,h) \in \mathcal{D}_k} h} \sum_{(x,h) \in \mathcal{D}_k, x < z} h
+(\#eq:weighted-rank-function)
+\end{equation}
+
+The Weighted Quantile Sketch algorithm seeks a set of candidate split points $\{ s_{k1}, s_{k2}, \dots, s_{kl} \}$ such that the difference in rank between consecutive points is approximately constant $| r_k(s_{k, j+1}) - r_k(s_{k, j}) | < \varepsilon$. Here, the tolerance $\varepsilon$ is an approximation factor that controls the number of candidates (intuitively, it is found that $l \approx 1/\epsilon$). The algorithm to build this sketch avoids a full sort and is instead based on a data structure that supports `merge` and `prune` operations, allowing it to work on data streams with provable theoretical guarantee.
+
+This proposal of candidate splits can be performed in two modes:
+
+* **Global Variant**: The candidate points for each feature are proposed once at the beginning of tree construction based on the initial dataset. The same set of candidates is then used for all splits at all levels of the tree, making this the computationally simplest approach.
+* **Local Variant** The candidate points are re-proposed within each node, based only on the subset of data that currently reside in that node. This is more computationally intensive but is also more adaptive, potentially finding better splits deep in the tree.
+
+The approximate algorithm, powered by this sophisticated candidate proposal strategy, provides a powerful and theoretically grounded first step away from brute-force computation.
+
+#### Scaling with the Histogram Method
+
+While the Weighted Quantile Sketch provides a theoretically elegant approximation, the most efficient and widely used implementation of the approximate framework is the **Histogram Method** due to its unmatched efficiency and hardware-friendly computational structure. This approach is the cornerstone of high-performance tree boosting and, as we will see, the critical enabler of GPU acceleration.
+
+The algorithm's strategy replaces the expensive sorting phase with a process that unfolds in three clear steps:
+
+1. **Feature Discretization (Binning)**: Before training begins, the algorithm performs a one-time scan over the dataset to dicretize each continuous feature into a small, fixed number of bins (typically 256), mapping the continuous values to low-precision integets representing their bin index. This process is analoguous to the step in the approximate framework where continuous features are mapped into buckets based on candidate split points. This initial investment pays significant dividends, as it dramatically reduces the number of split points to evaluate and allows the dataset to be held in a more compact, memory-efficient format.
+
+2. **Histogram Aggregation**: At each node in the tree, the algorithm makes a single pass through the relevant data instances, a process referred to as *streaming*. For each feature, it builds a histogram by iterating through the pre-binned values. Each bin, $b$, aggregates two crucial statistics: the sum of gradients ($G_b = \sum_{i \in b} g_i$) and the sum of Hessians ($H_b = \sum_{i \in \text{bin}_b} h_i$), for the instances that fall into that bin.
+
+3. **Split-Point Evaluation**: With the histogram built, the algorithm no longer needs to reference the underlying data to find the best split. Instead, it performs a fast linear scan over the histogram bins to find the split point that maximizes the gain formula. To evaluate a potential split after bin $k$, it needs the gradient and Hessians sums for the proposed left partition (bins $1$ to $k$) and the right partition (bins $k+1$ to $B$). By using cumulative sums of $G_b$ and $H_b$ across the bins, these values can be retrieved in constant time, allowing the gain to be calculated at every possible sploit point with minimal computational effort.
+
+The separation of concerns (i.e., a single data scan followed by a much faster scan over the small aggregated histograms) is the source of the method's efficiency. The computational complexity of finding the best split for a node is reduced from the $O(p \cdot n_N \cdot \log{n_N})$ of the exact greedy algorithm to approximately $O(p \cdot (n_N + B))$. Since the number of bins $B$ is a small constant typically much smaller than the number of instances $n_N$, the dominant cost becomes the single linear scan over the data, a dramatic improvement.
+
+To further optimize this process, XGBoost employs the *histogram subtraction trick*. Once the best split is found for a node, the data is partitioned into two children. Instead of scanning the data twice to build histograms for both the left and right child, the algorithm builds a histogram for only the smaller of the two noces. The histogram for a larger node can then be calculated for free by taking the parent's known histogram and subtracting the newly computed histogram of its sibling. This saves redundant computation, especially as the tree grows deeper and nodes become smaller.
+
+Ultimately, the compitational structure of this histogram-based approach is defined by regular, data-parallel operations on compact data structures. It minimizes the complex, irregular memory access patterns of sorting and is precisely what makes the algorithm an ideal candidate for massive parallelization, laying the groundwork for the architectural leap to GPUs.
+
+#### Algorithmic and System-Level Optimizations
+
+Beyond the core histogram algorithm, the practical success of XGBoost hinges also on several key innovation that handle complexities of real-world data and optimize the use of hardware resources. These refinements include a principled approach to sparse data and a carefully engineered system design.
+
+##### Sparsity-Aware Split-Finding {#sparsity}
+
+XGBoost incorporates an efficient mechanism to handle sparse data natively, which adds to its functionality for real-world datasets where missing values and artifacts of feature engineering (like one-hot encoding) are common. Instead of imputing missing values, the algorithm has a mechanism for learning an optimal "default direction" for each feature at each node. Specifically, when considering a candidate split on a feature $x_j$ for a set of instances $I$ in the current node:
+
+1. The instances are first partitioned into two groups: $I_\text{present}$ with the non-missing values for $x_j$, and $I_\text{missing}$, with the missing values.
+
+2. The instances in $I_\text{present}$ are divided into a potential left $I'_L$ and right $I'_R$ child sets, as per split finding.
+
+3. The optimal direction for instances in $I_\text{missing}$ is determined by explicitly evaluating via \@ref(eq:xgboost-gain) both $\text{Gain}_{L}$ and $\text{Gain}_{R}$ for $I_L = I'_L \cup I_\text{missing}$ and $I_R = I'_R \cup I_\text{missing}$ respectively.
+
+4. The default direction that yields maximum gain is then selected, and the actual split occurs in that direction. The respective gain is recorded for this candidate split to be used to compare against other candidate splits.
+
+While this process does add a computational step, it is highly efficient, as the sums of gradients and Hessians for $I_\text{missing}$ can be computed once for the current node and then added to the respective sums when calculating gains. This process is typically much faster than most imputation procedures followed by standard tree training, and has the added benefit of being data-driven, potentially uncovering and exploiting patterns in the missingness itself.
+
+##### System-Level Design for Scalability
+
+Beyond the sophisticated mathematical formulation of its regularized objective and its advanced split finding provisions, XGBoost's performance is also attributed to some careful engineering considerations that optimize resource utilization and enable efficient processing of large-scale datasets that often exceed the capacity of the main memory. While a full treatment of these system-level details fall more within the domain of software engineering, their core ideas are summarized here as they are essentially for understanding the system's overall scalability. Specifically:
+
+* **Column Blocks for Parallel Learning**: Data is stored in in-memory units called "blocks". Within each block, data is stored in a compressed column format, with each column sorted by its corresponding feature value. This pre-sorted layout, computed only once, facilitates the parallelization of the split-finding process across CPU threads.
+
+* **Cache-Aware Access**: To mitigate the CPU cache misses that can occur from the non-contiguous memory access required when gatheric gradient statistics, XGBoost employs a cache-aware prefetching algorithm. Each thread uses an internal buffer to fetch data in mini-batches, reducing runtime overhead on large datasets.
+
+* **Out-of-Core Computation**: XGBoost can handle datasets larger than available RAM by dividing the data into blocks and storing them on disk. It improves I/O throughput with two primary techniques: block compression, which trades CPU cycles for reduced disk reading time, and block sharding, which striped data across multiple disks to be read in parallel.
+
+These system-level optimizations ensure that the sophisticated algorithmic features can be practically applied to the large and complex datasets encountered in modern computational statistics.
+
+### GPU-Accelerated Tree Construction: XGBoost's `gpu_hist` {#gpu-hist}
+
+#### The Emergent Computational Profile
+
+The transition from the exact greedy algorithm to a fully-featured, histogram-based approach does more than merely optimize the tree building process. It fundamentally reshapes the computational character of the problem. By eliminating the irregular, data-dependent sorting operation at its core, the primary performance bottleneck of the system shifts entirely. The algorithm is no longer constrained by the complex, branching logic of a CPU-intensive sort, but rather by the simple, regular task of streaming through data to aggregate statistics into histograms. This transformation creates a new performance profiles, summarized Table \@ref(tab:xgboost-method-comparison), which serves as the crucial link to the next stage of hardware acceleration.
+
+```{r xgboost-method-comparison, echo=FALSE}
+criterion_col <- c(
+  "\\textbf{XGBoost \\texttt{tree\\_method}}",
+  "\\textbf{Core Operation}",
+  "\\textbf{Candidate Splits}",
+  "\\textbf{Primary Bottleneck}",
+  "\\textbf{Algorithm Complexity}",
+  "\\textbf{GPU Suitability}"
+)
+
+exact_col <- c(
+  "\\texttt{exact}",
+  "Full Data Sorting",
+  "All unique values",
+  "$O(n \\log n)$ (Sort-based)",
+  "High (Irregular)",
+  "Poor"
+)
+
+approx_col <- c(
+  "\\texttt{approx}",
+  "Weighted Quantile Summary",
+  "Few, data-driven",
+  "$O(n)$ (Sketch-based)",
+  "Medium (Streaming)",
+  "Better"
+)
+
+hist_col <- c(
+  "\\texttt{hist}",
+  "Histogram Aggregation",
+  "Fixed bin boundaries",
+  "$O(n)$ (Scan-based)",
+  "Low (Regular)",
+  "\\textbf{Excellent}"
+)
+
+method_comparison <- data.frame(
+  Criterion = criterion_col,
+  `Exact Greedy Algorithm` = exact_col,
+  `Approximate Quantile Sketch` = approx_col,
+  `Histogram Method` = hist_col,
+  check.names = FALSE
+)
+
+kable(
+  method_comparison,
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE,
+  linesep = c("", "", "", "\\addlinespace", "", ""),
+  col.names = c(
+    "Criterion", 
+    "Exact Greedy Algorithm", 
+    "Approximate Quantile Sketch", 
+    "Histogram Method"
+  ),
+  align = "l",
+  caption = "A comparison of XGBoost's tree construction algorithms."
+) |>
+  kable_styling(
+    latex_options = c("striped", "hold_position"),
+    font_size = 9
+  ) |>
+  column_spec(1, bold = TRUE, width = "4cm") |>
+  column_spec(2:4, width = "3.8cm")
+```
+
+The trajectory from complex, data-dependent logic towards simple, parallelizable aggregation is the key to XGBoost's modern scalability. This evolution transforms the problem from being **compute-bound**, where performance is limited by the speed of CPU's logical operations, to being **memory-bandwidth-bound**, where performance is dictated by the rate at which data can be read from memory. As derived in the context of Equation \@ref(eq:regularized-objective-taylor), each boosting iteration requires two large-scale, data-parallel computations:
+
+1. The calculation of per-instance first and second-order gradients, $g_i$ and $h_i$, for all $n$ training instances.
+2. The repeated aggregation of these $g_i$ and $h_i$ values into histograms to evaluate the Gain (Equation \@ref(eq:xgboost-gain)) for every potential split in every growing node.
+
+The very optimizations designed to make XGBoost faster on a CPU unintentionally forged a computational profile that is a relatively poor match for latency-optimized CPU cores but a perfect fit for an entirely different hardware paradigm: the massively parallel, high-throughput architecture of the modern GPU.
+
+This architectural synergy is exploited by the GPU histogram method, the so called `gpu_hist` tree construction algorithm in XGBoost detailed by @Mitchell2017. This method represents a ground-up redesign of the tree-build process, engineered to execute entirely on the GPU and leverage its massive parallelism. The result is a feature-complete implementation that can reduce training times from hours to minutes, making comprehensive modeling and hyperparameter tuning practically feasible on large-scale datasets.
+
+#### Bridging Algorithm and Architecture
+
+The efficacy of `gpu_hist` stems from the direct mapping between the computational patterns of the histogram algorithm and the core design philosophy of the GPU. As discussed, CPUs are latency-optimized, designed for complex, sequential logic on a few powerful cores. GPUs are throughput-optimized, featuring thousands of simpler cores built to execute the same instruction across vast amounts of data in parallel (the "SIMD" architecture). They excel at hiding the high latency of memory access by orchestrating a massive number of concurrent threads, ensuring compute units remain saturated.
+
+The mathematical structure of the histogram method is a perfect match for this paradigm. The calculation of the Gain in \@ref(eq:xgboost-gain) relies on sums of gradients ($\sum{g_i}$) and Hessians ($\sum{h_i}$). Building a histogram is, therefore, fundamenetally a *parallel reduction*, a classic GPU computing pattern where an array of values is reduced to a single value using a binary-associative operator. Thousands of threads can collaboratively perform this aggregations with high efficiency using a tiered approach of reductions within warps (groups of 32 threads) and thread blocks. In contrast, the complex branching and sorting logic of the Exact Greedy Algorithm is ill-suited to this architecture.
+
+Furthermore, the `gpu_hist` implementation processes all nodes at a given level of the tree concurrently. While many traditional tree algorithms process nodes one by one, leaving the GPU severely underutilized, this level-wise strategy ensures that a large volume of parallel work is always available to keep the hardware fully occupied.
+
+#### Data Layout and Level-Wise Growth on the GPU
+
+The overarching strategy of the `gpu_hist` algorithm is to build trees *level-wise*, processing all nodes at a given depth concurrently. This approach ensures that a sufficient volume of parallel work is always available to keep the thousands of GPU cores occupied, which is essential for hiding memory latency and maximizes hardware utilization. At each level, the algorithm executes a sequence of steps: it finds the best splits for all current leaf nodes, updates the position of every training instance based on these splits, and finally re-groups the data for the next level.
+
+To facilitate this high-throughput strategy, both data organization and the parallel processing model are critical. The work of finding the best split is delegated such that each feature is processed in parallel by a dedicated thread block. To make this efficient, data is organized in GPU device memory in a specific *columnar format*. Each feature is stored as a contiguous block of values, and each value is apired with the ID of the instance it belongs to, which allows it to be mapped back to the corresponding gradient ($g_i$) and Hessian ($h_i$) pair for that data point.
+
+This columnar layout is fundamental to performance on GPUs because it enabled *coalesced memory access*, a crucial optimization where a group of threads can read a contiguous segment of memory in a single, efficient transaction. This maximizes memory bandwidth which is vital for the histogram-building step's rapid, sequential scan over all values of a feature. For sparse data, this principle is extended by using specialized compressed formats that maintain a regular memory access pattern suitable for the GPU's SIMD execution model, resulting in a lower memory footprint and higher throughput. After each thred block find the best split for its assigned feature, the results are written to global memory, and a final, fast reduction kernel selects the single best split across all features for each node.
+
+#### A Hybrid Strategy for Split-Finding
+
+A key insight from @Mitchell2017 is that the `gpu_hist` implementation is not one single algorithm but a hybrid that intelligently switches its split-finding strategy based on tree depth. This pragmatic engineering choice is designed to balance the high fixed cost of sorting against the limited temporary storage (registers and shared memory) available on the GPU. The algorithm can therefore achieve optimal performance for both shallow and deep trees.
+
+##### Interleaved Method (Shallow Trees)
+
+For the initial, shallower levels of the tree (e.g., up to depth 5 or 6), data instances remain in their original sorted order, and their assignment to different nodes is tracked separately. This creates a situation where data for different nodes is mixed, or "interleaved", in memory. To find splits in this state required a *multiscan* operation, which is a variation of a parallel prefix sum that must maintain separate running sums for each node bucket.
+
+Because this requires storing a vector of sums, it becomes impractical as the number of nodes (and thus buckets) grows, due to the limited temporary storage on the GPU. The `gpu_hist` implementation uses fast, warp-level scans executed sequentually for each bucket, which is efficient for a small number of nodes but whose runtime increases exponentially with tree depth.
+
+##### Sorting Method (Deep Trees)
+
+Once the number of nodes grows large, the interleaved approach becomes inefficient. The algorithm then switches to a sorting-based method. It performs a single, highly efficient GPU radix sort to phystically re-group all instances by their current node ID. This sorting operation transforms the data so that all instances belonging to the same node are in a contiguous block, or "segment".
+
+This reordering allows the algorithm to use a more scalable *segmented scan* to find the best splits. A segmented scan is a parallel prefix sum modified to handle multiple sequences within a single array. It works by using a custom operator that checks the key (in this case, the node ID) of adjacent elements. If the key changes, the running sum is reset. This approach has constant temporary storage requirements, allowing it to scale to arbitrary tree depths.
+
+#### GPU-Accelerated Sparsity Handling
+
+As detailed in Section \@ref(sparsity), the algorithm must learn an optimal "default direction" for missing values by evaluating whether sending them left or right yields a greater Gain. The GPU implementation optimizes this process significantly.
+
+Instead of the two-scan method used by the CPU algorithm, the GPU version first performs a single, fast parallel reduction over all the non-missing values in the node to get their combined gradient and Hessian statistics. By subtracting this result from the known total statistics of the parent node, it can derive the statistics for the group of missing values in one step. With these statistics known, the algorithm then only needs to perform a single scan over the non-missing values to find the best split point and determine the optimal default direction. This approach is far more efficient on parallel hardware, minimizing memory transfers and redundant computation.
+
+#### Modern Enhancements and Scalability Beyond a Single GPU
+
+The development of GPU acceleration for XGBoost is ongoing. Recent releases demonstrate a commitment to expanding this high-performance backend. Key advancements include:
+
+**Backend and Hardware Support**: Introducing of a SYCL backend for broader hardware compatibility beyond NVIDIA's CUDA.
+
+**Algorithmic Improvements**: Support for multi-output decision trees and auto-scaling of the number of histogram bins to optimize usage of shared memory on modern GPUs (e.g., keeping memory per SM under 8 MiB).
+
+**Distributed and Multi-GPU Training**: For scaling beyond a single card, XGBoost integrates with distributing computing frameworks like Dask and Spark. It leverages NVIDIA's NCCL library for high-speed, all-reduce communication between GPUs, enabling efficient data-parallel training across multiple GPUs on a single or multiple nodes.
+
+**In-Situ Hyperparameter Tuning**: Recent versions allow for hyperparameter tuning tasks like cross-validation to be run entirely on the GPU. This avoids the significant overhead of moving data back and forth between the GPU and CPU, dramatically speeding up the model selection process.

@@ -1,0 +1,157 @@
+# Benchmarking Statistical Solutions on GPU {#practice}
+
+## Introduction: Experimental Framework
+
+In Chapter \@ref(theory), we laid the theoretical groundwork for understanding how GPU acceleration can address the computational intensity of modern statistical methods. We explored two distinct classes of algorithms: kernel methods, renowned for their ability to model complex non-linear relationships but often constrained by the the $O(n^2)$ or worse complexity of kernel matrix operations, and XGBoost, a leading gradient boosting framework whose sequential tree-building process presents a significant computational challenge. For each, we dissected their inherent scalability bottlenecks and reviewed the algorithmic innovations that create a computational profile amendable to parallelization; Nyström approximation for kernel methods, and histogram-based split-finding for XGBoost.
+
+This chapter transitions from theory to practice. We aim to provide a rigorous, empirical validation of the theoretical claims by demonstrating the tangible impact of GPU acceleration on these methods. We present detailed benchmarks of state-of-the-art, GPU-accelerated libraries against their conventional CPU-based counterparts on large-scale, real-world datasets. A particular focus has been placed on ensuring that the experimental design is transparent and the results are reproducible. As such, all experimental setups, code, and resulting data are meticulously documented and have been made available in the appendices. In this section, we provide a high-level overview of the standardized experimental framework designed and applied to all benchmarks in this chapter.
+
+To ensure the integrity and reproducibility of our findings, a standardized experimental framework was designed. This includes the selection of two challenging, large-scale public datasets, the use of consistent hardware and software environment based on Google Colab, and a clear methodology for measuring both computational performance and statistical accuracy. This framework is detailed in the subsequent sections and provides the foundation for the empirical case studies of Falkon and XGBoost that form the core of this chapter.
+
+### Datasets for Benchmarking
+
+To rigorously evaluate the performance of the selected methods, two distinct, large-scale, and publicly available datasets were chosen. These datasets represent challenging, real-world problems in regression and classification, respectively, and their scale is suitable for testing model scalability. The following sections detail the origin, characteristics, and preprocessing pipelines for each.
+
+#### NYC Taxi Fare Prediction (Regression)
+
+This dataset is constructed from the complete 2024 NYC Yellow Taxi trip data, sourced from the @newyork2019 (TLC) public data repository. The dataset presents a challenging large-scale regression problem due to its volume and the complexity of its features. The primary objective of this task is to predict the continuous `fare_amount` target variable.
+
+The raw data consists of monthly Parquet files, which were first downloaded and consolidated into a single data pool. A comprehensive preprocessing pipeline was then executed to clean the data and engineer relevant features.
+
+1. **Feature Engineering**: To enrich the feature set, trip `duration` (in minutes) was calculated from the `tpep_pickup_datetime` and `tpep_dropoff_datetime` timestamps. Additionally, cyclical temporal features, `pickup_day` and `pickup_hour`, were extracted from the pickup timestamp to capture weekly and daily patterns.
+
+2. **Filtering**: A multi-stage filtering process was applied to ensure data quality and remove outliers. Records were retained only if they met the following criteria:
+
+* `fare_amount` between \$2.50 and \$200.
+* `trip_distance` between 0.1 and 100 miles.
+* `duration` between 1 and 360 minutes.
+* `passenger_count` between 1 and 6.
+
+Following this, any rows with remaining missing values were dropped. This pipeline resulted in a final data pool of over 35 million valid instances.
+
+3. **Data Splitting**: For model training and evaluation, the processed data was first partitioned into a training pool (80%) and a final test pool (20%). To evaluate scalability, training sets of varying sizes were then sampled from the training pool.
+
+4. **Scaling**: As a final preprocessing step, all features in the training and test sets were standardized by removing the mean and scaling to unit variance using the `StandardScaler` from scikit-learn.
+
+The final features used for model training are described in Table \@ref(tab:feature-description-table):
+
+```{r feature-description-table, echo=FALSE}
+feature_col <- c(
+  "\\texttt{VendorID}",
+  "\\texttt{passenger\\_count}",
+  "\\texttt{trip\\_distance}",
+  "\\texttt{RatecodeID}",
+  "\\texttt{PULocationID}",
+  "\\texttt{DOLocationID}",
+  "\\texttt{payment\\_type}",
+  "\\texttt{duration}",
+  "\\texttt{pickup\\_day}",
+  "\\texttt{pickup\\_hour}",
+  "\\texttt{fare\\_amount}"
+)
+
+desc_col <- c(
+  "A code indicating the TPEP provider.",
+  "The number of passengers in the vehicle.",
+  "The elapsed trip distance in miles.",
+  "The final rate code for the trip.",
+  "TLC Taxi Zone ID where the trip began.",
+  "TLC Taxi Zone ID where the trip ended.",
+  "A numeric code indicating how the passenger paid.",
+  "\\textit{Engineered:} Total trip duration in minutes.",
+  "\\textit{Engineered:} Day of the week (0=Mon, 6=Sun).",
+  "\\textit{Engineered:} Hour of the day (0-23).",
+  "The time-and-distance fare calculated by the meter."
+)
+
+type_col <- c(
+  "Categorical",
+  "Numerical",
+  "Numerical",
+  "Categorical",
+  "Categorical",
+  "Categorical",
+  "Categorical",
+  "Numerical",
+  "Numerical",
+  "Numerical",
+  "\\textbf{Target}"
+)
+
+features_df <- data.frame(
+  `Feature Name` = feature_col,
+  Description = desc_col,
+  Type = type_col,
+  check.names = FALSE
+)
+
+kable(
+  features_df,
+  format = "latex",
+  booktabs = TRUE,
+  escape = FALSE,
+  align = "l",
+  caption = "Description of NYC Taxi Fare features used for model training."
+) |>
+  kable_styling(
+    latex_options = c("striped", "hold_position"),
+    font_size = 10
+  ) |>
+  column_spec(1, width = "4.5cm") |>
+  column_spec(2, width = "7.5cm") |>
+  column_spec(3, width = "2.5cm")
+```
+
+#### HIGGS Boson Detection (Classification)
+
+The second dataset is the HIGGS benchmark from the UCI Machine Learning Repository [@Dua:2019; @baldi2014searching]. It is a well-known dataset for large-scale binary classification, containing 11 million instances derived from Monte Carlo simulations of particle collisions. The objective is to classify events as either "signal" (class 1), corresponding to the production of a Higgs boson, or "background" (class 0).
+
+The dataset is already well-structured, requiring minimal preprocessing:
+
+1. **Feature Set**: The dataset contains 28 features and one class label. The features are categorized into 21 low-level kinematic properties directly measured by particle detectors and 7 higher-level, derived features. All 28 features were used for the classification task. No additional feature engineering or filtering was necessary.
+
+2. **Data Splitting**: The full dataset was partitioned into a training pool (80%) and a fixed test set (20%). The handle the natural class imbalance and ensure that the training and test sets are representative of the overall data distribution, this split was stratified based on the class label. To test model scalability, training sets of varying sizes were then subsampled from the training pool, again using stratification.
+
+3. **Scaling**: As with the regression dataset, all 28 features in the training and test sets were standardized using `StandardScaler`.
+
+### Hardware and Software Environment
+
+All benchmarks were confucted within the Google Colaboratory (Colab) cloud platform to ensure a standardized and reproducible experimental environment. This choice provides on-demand access to specialized computational resources, mitigating the challenges of local hardware procurement and configuration.
+
+The experimental work was carried out across two distinct hardware configurations. Initial testing and exploratory analysis was performed using the free tier of Google Colab. The primary hardware for the GPU-accelerated tests in this setting was an **NVIDIA T4 GPU** with 14.7 GB of VRAM. The corresponding CPU baseline was established using the platform's multi-core **Intel Xeon CPU @ 2.00GHz**, with access to 12.7 GB of system RAM.
+
+The final, reported benchmarks were executed on the more powerful **Google Colab Pro+** tier. This premium configuration featured a high-performance **NVIDIA A100-SXM4-40GB GPU** and an **Intel Xeon CPU @ 2.20GHz**, with access to a substantial **83.5 GB of system RAM**. The upgrade to the A100 GPU yielded a dramatic performance improvement, with a qualitative speedup of nearly $5 \times$ in some test cases compared to the T4. That is both due to the increased performance of the GPU itself, and due to the larger capacity in host and device memory. Despite the availability of superior hardware, the experimental settings from the initial T4 tests (e.g., sample sizes) were intentionally retained. This approach ensures that the benchmark results are reproducible even on the free tier, but given the configurable options of the tests, it can easily be adjusted.
+
+All experiments were performed within a consistent Python ecosystem. The core libraries used throughout the chapter include Falkon, XGBoost, Scikit-learn, PyTorch, NumPy and Pandas. Specific versions for each library are documented within the respective case-study sections to ensure full transparency.
+
+### Benchmarking Methodology
+
+A standardized protocol was applied to all experiments. Each GPU-accelerated implementation is benchmark against one or more CPU-based alternatives to allow for direct measurement of speedup and scalability.
+
+#### Performance Metrics
+
+The primary metrics used for evaluating computational performance are:
+
+* **Training Time**: Wall-clock time in seconds to fit the model on the training dataset.
+* **Prediction Time**: Wall-clock time in seconds to generate preditions for the held-out test set.
+
+#### Statistical Accuracy Metrics
+
+To ensure that computational performance gains do not compromise predictive quality, the following task-specific metrics are used:
+
+* For **regression tasks**, Root Mean Squared Error (RMSE) and the Coefficient of Determination ($R^2$) are reported.
+* For **classification tasks**, Area Under the ROC Curve (AUC), Accuracy, and the F1-Score are reported.
+
+#### Reproducibility and Uncertainty Quantification
+
+To mitigate variability from system load and stochastic processes within the algorithms, each benchmark configuration was executed multiple times, using parameter `N_RUNS` in the Notebook setup. This parameter was set to `N_RUNS = 5` for the measurements reported on this text. The results for time-based and accuracy metrics are reported as **mean** $\pm$ **standard deviation**. A fixed random state (parameter `RANDOM_STATE = 6`) was used for all stochastic operations, including data splitting and model initialization, to ensure comparability of results across different runs and implementations.
+
+```{r practice_falkon, child = '03a-falkon.Rmd'}
+```
+
+```{r practice_xgboost, child = '03b-xgboost.Rmd'}
+```
+
+```{r practice_dicussion, child = '03c-discussion.Rmd'}
+```
+

@@ -1,0 +1,29 @@
+# Conclusion and Future Directions
+
+## Summary of Key Findings
+
+The quest for computational power is not external to statistics but is a challenge that has defined it from its very beginning. The central finding of this work is that effective hardware acceleration is not a matter of simply porting existing solutions, but rather a process of deliberate algorithmic co-design. As demonstrated through the case studies of Falkon and XGBoost, the most profound performance gains are unlocked only after fundamentally reshaping statistical algorithms to align with the architectural strengths of the GPU.
+
+By replacing direct matrix inversions with Nyström-based iterative solvers and exhaustive sorting with histogram aggregations, these methods were transformed into regular, data-parallel tasks perfectly suited for the GPU's high-throughput design. Low-level optimizations like deep memory hierarchy awareness and strategic use of mixed-precision arithmetic further unlocked the full performance potential of the hardware.
+
+The empirical benchmarks confirmed the success of this approach, revealing orders-of-magnitude speedups that were achieved without sacrificing statistical accuracy. This work empirically validates that a hardware-aware perspective is essential for breaking through the "computational wall" that has historically limited the scale of statistical modelling.
+
+## Implications for Statistical Practice
+
+The architectural characteristics of GPUs, specifically their massive parallelism, high memory bandwidth, and hierarchical memory system, render them exceptionally well-suited for accelerating a wide range of computationally intensive statistical methods. Any tasks that exhibit substantial data parallelism, where the same set of operations can be performed independently across numerous data elements, is a prime candidate for GPU acceleration. 
+
+For statistics, this opens up new possibilities for many foundational and advanced techniques. This includes:
+
+* **Large-scale linear algebra operations**, such as matrix multiplication and vector operations, which are fundamental to a vast number of statistical models.
+* **Resampling techniques** like bootstrapping and permutation tests, which can be executed concurrently by running thousands of independent analyses in parallel, as demonstrated with the MCMC sampler in Chapter \@ref(programming).
+* **Likelihood calculations** in complex models with large datasets can be parallelized by computing contributions from individual data points simultaneously.
+* **Distance computations**, which are prevalent in methods such as *k*-nearest neighbors and Kernel Methods, are inherently data-parallel.
+* **Ensemble learning algorithms**, such as Random Forests and Gradient Boosting Machines, can often be accelerated by building or evaluating their many individual models in parallel.
+
+By effectively mapping the parallelizable components of these algorithms onto the GPU architecture, it is possible to achieve significant reductions in computation time. This acceleration not only enables more complex analysis on larger datasets but also facilitates faster research iterations and more thorough model exploration.
+
+## Directions of Future Research
+
+The work presented here opens several promising avenues for future research. While this thesis focused primarily on single-GPU implementations, a natural next step is to explore **distributed, multi-GPU training** to tackle problems that exceed the memory capacity of a single card. Most importantly, there is a significant opportunity to develop highly-optimized parallel libraries for advanced statistical domains where GPU acceleration is still underexplored.
+
+The author of this work intends to continue research in this field by focusing on creating such libraries for specialized methods. Promising areas include **complex non-linear optimization** and **advanced Bayesian models**, such as hierarchical, state-space, or mixed-effects models, building upon the parallel sampling concepts introduced in Chapter \@ref(programming). The goal is to leverage GPU power in areas of statistics that have not yet fully benefited from it, further closing the gap between cutting-edge theory and practical, scalable application.

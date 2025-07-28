@@ -1,0 +1,20 @@
+# Algorithmic Pathways to GPU-Accelerated Statistics {#theory}
+
+## Introduction: Statistical Motivation
+
+Modern statistical methods, while powerful, are often constrained by their own computational intensity. This creates a persistent challenge in applying sophisticated theoretical models to the large-scale data common in contemporary research and industry. This chapter explores this issue by dissecting the specific algorithmic pathways that enable two common, yet fundamentally different classes of methods to leverage the massive parallelism of GPUs.
+
+The analysis centres on two distinct case studies: Kernel Methods, as implemented in the Falkon library, and Gradient Boosting, via the ubiquitous XGBoost framework. These methods were chosen deliberately to offer a rich comparative analysis. They highlight how different computational bottlenecks demand different optimization philosophies specifically because their primary challenges originate from different aspects of their design.
+
+Kernel Methods are an exercise in dense linear algebra, with performance dictated by the efficiency of matrix operations and decompositions. They ultimately represent a problem of scaling, as their intrinsic polynomial complexity makes the exact algorithm fundamentally infeasible for large datasets, and thus the primary goal is to change the algorithm's complexity class itself. XGBoost, on the other hand, presents an opportunity for acceleration, since its design makes data aggregation and search the primary bottleneck. Its exact algorithm is computationally feasible, but prohibitively slow for the iterative demands of model development and tuning, making raw speed the primary objective.
+
+This chapter aims to deconstruct the evolution of these two methods from their theoretical foundations to their highly optimized, hardware-aware implementation. In doing so, it demonstrates that effective GPU utilization is not a simple matter of porting code from one hardware architecture to another. Rather, deliberate algorithmic redesign needs to take place in order to reshape statistical computation to align with the core architectural strengths of modern parallel hardware.
+
+```{r kernel_methods, child = '02a-kernel-methods.Rmd'}
+```
+
+```{r xgboost, child = '02b-gradient-boosting.Rmd'}
+```
+
+```{r theory_discussion, child = '02c-discussion.Rmd'}
+```

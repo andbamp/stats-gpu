@@ -1,0 +1,51 @@
+# An Introduction to GPU Programming {#programming}
+
+## Introduction: Building a Massively Parallel MCMC Sampler with CUDA C++
+
+Chapter \@ref(theory) established that rigorous theoretical and algorithmic analysis is required in order to proceed with hardware acceleration of statistical methods. Then, Chapter \@ref(practice) provided an empirical validation of the real-world impact of GPU-accelerated implementations of methods such as Kernel Ridge Regression and XGBoost through state-of-the-art libraries that deliver transformative performance gains. To truly "bridge the gap" between theory and practice, however, one last crucial question must be answered: *How are these powerful, high-performance tools actually constructed?*
+
+This final chapter addresses that question by shifting perspective from that of an analyst to that of an architect. It is designed as a pedagogical bridge, moving beyond the use of existing tools to demystify the very development process of those tools. We will pursue this examination by constructing a complete statistical application from the ground up using CUDA C++, in order to illustrate the granular, low-level control over memory and execution that is essential for developing novel or highly specialized algorithms. The pedagogical vehicle for this demonstration will be the Markov Chain Monte Carlo (MCMC) sampler, a cornerstone of modern Bayesian inference.
+
+### Embarrassingly Parallel Bayesian Inference
+
+Bayesian analysis is founded on Bayes' theorem, which provides a mathematical framework for updating beliefs about parameters, $\boldsymbol{\theta}$, in light of observed data, $\mathbf{y}$. The objective is to characterize the *posterior distribution* $p(\boldsymbol{\theta} | \mathbf{y})$, which is proportional to the product of the *likelihood* $p(\mathbf{y} | \boldsymbol{\theta})$ and the *prior* $p(\boldsymbol{\theta})$:
+
+\begin{equation}
+p(\boldsymbol{\theta} | \mathbf{y}) = \frac{p(\mathbf{y} | \boldsymbol{\theta}) p(\boldsymbol{\theta})}{p(\mathbf{y})} \propto p(\mathbf{y} | \boldsymbol{\theta}) p(\boldsymbol{\theta})
+(\#eq:bayes-theorem)
+\end{equation}
+
+For most non-trivial models, the posterior distribution is analytically intractable due to the high-dimensional integral required to compute the *marginal likelihood* (or *evidence*) $p(\mathbf{y})$. MCMC methods offer a powerful numerical solution by constructing a Markov chain whose stationary distribution is the desired posterior, $p(\boldsymbol{\theta} | \mathbf{y})$, thereby allowing us to generate representative samples and approximate its properties.
+
+The Metropolis-Hastings algorithm is a general and widely-used MCMC method that achieves this. From a current state $\boldsymbol{\theta}_t$, the algorithm iteratively proposes a new state $\boldsymbol{\theta}'$ from a proposal distribution $q(\boldsymbol{\theta}' | \boldsymbol{\theta}_t)$. This proposed move is then accepted with a carefully constructed probability $\alpha$:
+
+\begin{equation}
+\alpha(\boldsymbol{\theta}', \boldsymbol{\theta}_t) = \min\left(1, \frac{p(\boldsymbol{\theta}'|\mathbf{y})q(\boldsymbol{\theta}_t | \boldsymbol{\theta}')}{p(\boldsymbol{\theta}_t|\mathbf{y})q(\boldsymbol{\theta}'|\boldsymbol{\theta}_t)}\right)
+(\#eq:metropolis-hastings)
+\end{equation}
+
+While statistically powerful, this presents a significant computational challenge. The algorithm is inherently sequential due to its Markovial property, meaning that each step in the chain depends directly on the state of the previous one. A single chain, therefore, cannot be parallelized. The key insight, however, is that running many *independent* chains is an embarrassingly parallel problem. This structure makes MCMC an ideal candidate for GPU acceleration and a perfect case study for CUDA C++ development.
+
+To maintain focus on the engineering challenges, we will implement a sampler for a simple, illustrative case: inferring the scalar mean $\mu$, of a Normal distribution given $N$ data points, $\mathbf{y} = \{ y_1, \dots, y_N \}$, with a known variance, $\sigma^2$. The statistical model is defined by:
+
+* **Likelihood**: The data is assumed to be drawn from a Normal distribution centered at $\mu$.
+
+\begin{equation}
+p(\mathbf{y} | \mu, \sigma^2) = \prod_{i=1}^{N} {\mathcal{N}{(y_i|\mu, \sigma^2)}}
+(\#eq:mcmc-likelihood)
+\end{equation}
+
+* **Prior**: Our initial belief about the mean $\mu$ is also described by a Normal distribution.
+
+\begin{equation}
+p(\mu) = \mathcal{N}(\mu | \mu_0, \tau_0^2)
+(\#eq:mcmc-prior)
+\end{equation}
+
+Although this conjugate model has a closed-form analytical solution, its simplicity makes it an ideal vehicle for showcasting the key engineering challenges of any parallel statistical simulation. The following subsections are structured as a methodical progression, assembling the conceptual and practical building blocks required to implement our massively paralllel MCMC sampler. In the conclusion, we will briefly contrast this low-level approach with high-level frameworks like **PyTorch**, which enable rapid prototyping by abstracting away hardware complexities.
+
+```{r cuda_mcmc, child = '04a-cuda-mcmc.Rmd'}
+```
+
+```{r discussion_pytorch, child = '04b-discussion-pytorch.Rmd'}
+```

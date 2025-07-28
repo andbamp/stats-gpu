@@ -1,0 +1,9 @@
+# (APPENDIX) Appendix {-}
+
+# Thesis Repository and Code {#appendix-code}
+
+All materials associated with this thesis have been made publicly available in a GitHub repository. This repository contains the full source code of the thesis document, all necessary scripts, and the complete, executable notebooks used to generate the benchmarks and analyses presented in Chapters \@ref(practice) and \@ref(programming).
+
+The full repository can be accessed at the author's GitHub page:
+
+* https://github.com/andbamp/
