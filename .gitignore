@@ -8,11 +8,11 @@
 *.log
 
 # Tex files
-
+*.tex
 
 # RStudio
 .Rproj.user
-
+*.Rproj
 
 # R files
 .Rhistory
