@@ -78,7 +78,7 @@ int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
 For example, a thread with `blockIdx.x = 2` and `threadIdx.x = 5`, in a grid where blocks have `blockDim.x = 8` threads, would calculate its global index as `2 * 8 + 5 = 21`.
 
-A parallel vector addition provides a canonical example of this principle. Adding two vectors, $\mathbf{A}$ and $\mathbf{B}$, is an embarrasingly parallel problem, as each element-wise addition, $C_i = A_i + B_i$, is completely independent of all others. The kernel to perform this task leverages the global index to assign each thread to one such addition.
+A parallel vector addition provides a canonical example of this principle. Adding two vectors, $\mathbf{A}$ and $\mathbf{B}$, is an embarrassingly parallel problem, as each element-wise addition, $C_i = A_i + B_i$, is completely independent of all others. The kernel to perform this task leverages the global index to assign each thread to one such addition.
 
 ```{cpp, cpp-vector-add-kernel, eval=FALSE, echo=TRUE, size='small', code.cap="The CUDA C++ kernel for parallel vector addition, which uses the global thread index to assign each thread to a specific element-wise operation."}
 /*
@@ -247,9 +247,9 @@ This complete, functional program demonstrates that the separate memory space of
 
 The `vectorAdd` example was entirely deterministic. Given the same inputs, it will always produce the same output. However, many fundamental methods in statistics are stochastic. Simulation-based techniques such as the Bootstrap, permutation tests, and our chosen case study, MCMC, are central to modern statistical practice. To implement these on a GPU, we require a robust and statistically sound source of random numbers that is safe to use in a massively parallel environment.
 
-This requirement reveals a critical pitfall and an important opportunity. A programmer accustomed to a CPU-only environment might be tempted to use a standard C function like `rand()` inside a CUDA kernel. This approach is fundamentally flaws and leads to incorrect results. Standard random number generators (RNG) typically rely on a single, hidden global state that is updated each time a number of is generated. If thousands of GPU threads call a function simultaneously, they create a "race condition", all attempting to read and update this single state at once. This not only destroys the statistical properties of the resulting number sequences but also makes the simulation entirely non-reproducible.
+This requirement reveals a critical pitfall and an important opportunity. A programmer accustomed to a CPU-only environment might be tempted to use a standard C function like `rand()` inside a CUDA kernel. This approach is fundamentally flawed and leads to incorrect results. Standard random number generators (RNG) typically rely on a single, hidden global state that is updated each time a number is generated. If thousands of GPU threads call a function simultaneously, they create a "race condition", all attempting to read and update this single state at once. This not only destroys the statistical properties of the resulting number sequences but also makes the simulation entirely non-reproducible.
 
-The solution is to use libraries specifically designed for the parallel architecture of the GPU. The CUDA toolkit includes a rich ecosystem of high-performance libraries that provide optimized implementations of common computational primitives. These libraries, such as cuBLAS (for libear algebra), cuFFT (for Fourier Transforms), and cuDNN (for deep neural networks), are the foundational building blocks upon which many industry-standard, GPU-accelerated tools, including PyTorch, TensorFlow, and even XGBoost, are built. For our purposes, the most relevant of these is the `cuRAND` library.
+The solution is to use libraries specifically designed for the parallel architecture of the GPU. The CUDA toolkit includes a rich ecosystem of high-performance libraries that provide optimized implementations of common computational primitives. These libraries, such as cuBLAS (for linear algebra), cuFFT (for Fourier Transforms), and cuDNN (for deep neural networks), are the foundational building blocks upon which many industry-standard, GPU-accelerated tools, including PyTorch, TensorFlow, and even XGBoost, are built. For our purposes, the most relevant of these is the `cuRAND` library.
 
 `cuRAND` is designed to solve the parallel RNG problem by adhering to a simpler but powerful principle: instead of a single global generator, each thread is given its own independent RNG state. This ensures that the streams of random numbers produced by each thread are statistically independent and that there is no interference or contention between threads. The key components for using `cuRAND` are:
 
@@ -354,17 +354,17 @@ free(h_output);
 return 0;
 ```
 
-This example illustrates the necessity of using specialized, hardware-aware libraries like `cuRAND` to perform even fundamental statistical operations in a parallel environment. The ability to generate statistically valid random numbers for each thread independently is the final conceptural tool required before we can assemble our complete MCMC sampler.
+This example illustrates the necessity of using specialized, hardware-aware libraries like `cuRAND` to perform even fundamental statistical operations in a parallel environment. The ability to generate statistically valid random numbers for each thread independently is the final conceptual tool required before we can assemble our complete MCMC sampler.
 
 ## Assembling a Massively Parallel MCMC Sampler
 
-With the foundatinoal concepts of the CUDA programming model established, we are now ready to assemble them to solve our statistical problem. This section deconstructs a complete, end-to-end MCMC sampler that leverages the GPU to run thousands of independent Markov chains in parallel. This approach transforms a traditionally time-consuming, sequential task into a high-throughput computation.
+With the foundational concepts of the CUDA programming model established, we are now ready to assemble them to solve our statistical problem. This section deconstructs a complete, end-to-end MCMC sampler that leverages the GPU to run thousands of independent Markov chains in parallel. This approach transforms a traditionally time-consuming, sequential task into a high-throughput computation.
 
 The final program consists of three key pieces of device code: a helper function to compute the log-posterior, a kernel to initialize the random number generators, and the main MCMC kernel. Orchestration occurs within the Host-side `main` function.
 
 ### MCMC Device Code: Kernels and Helpers
 
-To core of the application resides in the code executed on the GPU. This is where the statistical computational happens. The Device-side logic is in the kernels below, in addition to the `cuRAND` setup kernel presented in the previous section.
+The core of the application resides in the code executed on the GPU. This is where the statistical computation happens. The Device-side logic is in the kernels below, in addition to the `cuRAND` setup kernel presented in the previous section.
 
 #### The `log_posterior` Device Function
 
@@ -446,7 +446,7 @@ __global__ void mcmc_kernel(float *d_output, const float *d_data,
 
 ### Host Code: Orchestrating the Sampler
 
-The host is responsible for setting up the problem, managing the GPU, and analyzing the final results.
+The host is responsible for setting up the problem, managing the GPU, and analysing the final results.
 
 #### Problem Setup and Host Data Management
 

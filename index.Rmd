@@ -26,7 +26,6 @@ output:
 \mainmatter
 
 ```{r setup, include=FALSE}
-# This chunk runs first, setting options for all following chapters.
 knitr::opts_chunk$set(echo = FALSE,
                       warning = FALSE,
                       message = FALSE)
@@ -36,8 +35,9 @@ library(data.table)
 library(magrittr)
 library(ggplot2)
 library(kableExtra)
+```
 
-# Make your custom function available globally
+```{r custom_functions, include=FALSE}
 extract_mean_sd <- function(dat, col) {
   dat[, (col) := gsub("\\[|\\]", "", get(col))]
   stats <- lapply(strsplit(dat[[col]], ","), function(x) {
@@ -48,5 +48,24 @@ extract_mean_sd <- function(dat, col) {
   dat[, paste0(col, "_mean") := stats_dt$mean]
   dat[, paste0(col, "_sd") := stats_dt$sd]
   return(dat)
+}
+
+get_falkon_metrics <- function(dat, size) {
+  get_row <- function(rt) dat[run_type == rt & n_samples == size]
+  
+  cpu <- get_row("Falkon (CPU)")
+  gpu <- get_row("Falkon (GPU)")
+  
+  format_pm <- function(mean, sd) sprintf("%.2f ± %.2f", mean, sd)
+  
+  list(
+    train_cpu = format_pm(cpu$train_time, cpu$train_sd),
+    train_gpu = format_pm(gpu$train_time, gpu$train_sd),
+    train_speedup = sprintf("%.0f", cpu$train_time / gpu$train_time),
+    
+    pred_cpu = format_pm(cpu$pred_time, cpu$pred_sd),
+    pred_gpu = format_pm(gpu$pred_time, gpu$pred_sd),
+    pred_speedup = sprintf("%.0f", cpu$pred_time / gpu$pred_time)
+  )
 }
 ```

@@ -1,0 +1,195 @@
+% ===============================================================
+% TITLEPAGE FOR THESIS
+% ===============================================================
+
+% This command makes the following pages have no page numbers
+\pagestyle{empty}
+
+% This creates a blank page before the title page
+% \mbox{}\newpage
+
+%---------------------------------
+% English Title Page
+%---------------------------------
+\begin{titlepage}
+    \centering
+
+    % University and School Info
+    \includegraphics[width=\textwidth]{img/aueb_applied_statistics.jpg} \\[3cm]
+
+    % Thesis Title
+    {\fontsize{18}{22}\selectfont
+    \bfseries
+    COMPUTATIONAL STATISTICS AND\\[0.15cm]
+    GPU ACCELERATION} \\[2.5cm]
+
+    % Author Info
+    \normalsize
+    By \\[0.5cm]
+    {\fontsize{18}{22}\selectfont
+    ANDREAS S. BAMPOURIS} \\[3cm]
+
+    % Submission Text
+    \normalsize
+    A THESIS \\[1cm]
+    Submitted to the Department of Statistics \\[0.25cm]
+    of the Athens University of Economics and Business \\[0.25cm]
+    in partial fulfilment of the requirements for \\[0.25cm]
+    the degree of Master of Science in Applied Statistics
+
+    % This pushes the following content to the bottom of the page
+    \vfill
+
+    % Location and Date
+    Athens, Greece \\
+    July 2025
+\end{titlepage}
+\newpage
+
+%---------------------------------
+% Approval Page Placeholder
+%---------------------------------
+% This blank page serves as a placeholder.
+\mbox{}
+\newpage
+
+%---------------------------------
+% Greek Title Page
+%---------------------------------
+\begin{titlepage}
+    \centering
+
+    % University and School Info (Greek)
+    \includegraphics[width=\textwidth]{img/aueb_applied_statistics.jpg} \\[3cm]
+    % Thesis Title (Greek)
+    {\fontsize{18}{22}\selectfont
+    \bfseries
+    ΥΠΟΛΟΓΙΣΤΙΚΗ ΣΤΑΤΙΣΤΙΚΗ ΚΑΙ\\[0.15cm]
+    ΕΠΙΤΑΧΥΝΣΗ ΜΕΣΩ GPU} \\[2.5cm]
+
+    % Author Info (Greek)
+    \normalsize
+    \ \\[0.5cm]
+    {\fontsize{18}{22}\selectfont
+    ΑΝΔΡΕΑΣ Σ. ΜΠΑΜΠΟΥΡΗΣ} \\[3cm]
+
+    % Submission Text (Greek)
+    \normalsize
+    ΔΙΑΤΡΙΒΗ \\[1cm]
+    Που υποβλήθηκε στο Τμήμα Στατιστικής \\[0.25cm]
+    του Οικονομικού Πανεπιστημίου Αθηνών \\[0.25cm]
+    ως μέρος των απαιτήσεων για την απόκτηση \\[0.25cm]
+    Διπλώματος Μεταπτυχιακών Σπουδών στην Εφαρμοσμένη Στατιστική
+
+    % This pushes the following content to the bottom of the page
+    \vfill
+
+    % Location and Date (Greek)
+    Αθήνα, Ελλάδα \\
+    Ιούλιος 2025
+\end{titlepage}
+\newpage
+
+%---------------------------------
+% Start front matter numbering (roman numerals)
+% and re-enable page number display for subsequent pages
+%---------------------------------
+\frontmatter
+\pagestyle{fancy}
+
+%---------------------------------
+% Dedication Page
+%---------------------------------
+\chapter*{DEDICATION}
+
+\begin{flushright}
+    \itshape
+    To my father, Sotirios,\\
+    who first taught me how to use a computer.
+\end{flushright}
+
+\vfill
+
+\newpage
+
+%---------------------------------
+% Acknowledgements Page
+%---------------------------------
+\chapter*{ACKNOWLEDGEMENTS}
+
+{\itshape
+My journey into the world of data has been motivated by my desire to master the algorithms and the mathematics behind modern machine learning. I soon discovered that the discipline of statistics provided one of the most robust vehicles for that pursuit. This thesis represents the culmination of my deep dive into statistics, focusing on its natural intersection with computer science: computational statistics.
+
+The stimulating academic environment at the Athens University of Economics and Business was instrumental to this work. I am profoundly thankful to my supervisor, Professor Athanasios Yannacopoulos, who encouraged and empowered my decision to tackle a topic that might seem unconventional. This gratitude also extends to my professional environment over the years, where I have been fortunate to work with colleagues who have helped foster my growth not only as a professional but also as an academic.
+
+On a personal note, I am eternally grateful to my family and friends for their immense patience throughout this ambitious undertaking. I especially want to thank my father, whose gentle push was crucial in seeing this work through to its completion. Finally, to Giouli: this thesis would not have been possible without your unwavering support and understanding.
+}
+
+\vfill
+
+\newpage
+
+%---------------------------------
+% Vita Page
+%---------------------------------
+\chapter*{VITA}
+
+\vfill
+
+Andreas is a technology enthusiast with a passion for software engineering, applied statistics, and their intersection. He received his diploma in Electrical and Computer Engineering from the University of Patras in 2018. His early academic interests focused on machine learning, pattern recognition, and high-performance parallel computing, topics which he explored in his diploma thesis, ~\cite{Bampouris2018Development}.
+
+He has since worked for over five years as a Machine Learning Engineer and Data Scientist, building and maintaining large-scale data pipelines and production machine learning systems. He is a proponent of ongoing and self-motivated learning, enjoys coding and tinkering, and has interests ranging from science and technology, to history and linguistics.
+
+\vfill
+
+\newpage
+
+%---------------------------------
+% English Abstract Page
+%---------------------------------
+\chapter*{ABSTRACT}
+
+\vspace*{0.5cm}
+
+\noindent Andreas S. Bampouris
+
+\vspace{0.5cm}
+
+\noindent\textbf{Computational Statistics and GPU Acceleration}
+
+\vspace{0.25cm}
+
+\noindent\hfill July 2025
+
+\vspace{1cm}
+
+Modern statistical methods often become computationally prohibitive as data volumes and model complexity grow. This thesis examines how Graphics Processing Unit (GPU) acceleration can expand the practical scale of such methods. We organize the work around three components: (1) a theoretical analysis of computational bottlenecks in two widely-used but immensely intensive methods, Kernel Methods and Gradient Boosting, and the algorithmic redesign required for efficient GPU execution; (2) an empirical validation of the potential performance gains by benchmarking two state-of-the-art, GPU-accelerated libraries, Falkon and XGBoost, against CPU-based baselines on real-world datasets to quantify speedups and assess effects on predictive accuracy; and (3) an implementation-oriented overview of the enabling software frameworks, developing a massively parallel Markov Chain Monte Carlo (MCMC) sampler in CUDA as an illustrative case study.
+
+Results indicate that substantial performance gains are attainable on commodity GPU hardware with no material loss in statistical accuracy when algorithms are reformulated to exploit fine-grained parallelism and memory hierarchies. More broadly, the findings underscore that scalability in statistics is as much an engineering problem as it is a methodological one: algorithm design, data layout, and hardware architecture must be considered jointly. By moving from theory, to empirical evidence, to the underlying engineering, this thesis aims to bridge the gap between advanced statistical modelling and high-performance computing, and provides the tools to not only leverage but also contribute to this expanding field.
+
+\newpage
+
+%---------------------------------
+% Greek Abstract (Περίληψη) Page
+%---------------------------------
+\chapter*{ΠΕΡΙΛΗΨΗ}
+
+\vspace*{0.5cm}
+
+\noindent Ανδρέας Σ. Μπαμπούρης
+
+\vspace{0.5cm}
+
+\noindent\textbf{Υπολογιστική Στατιστική και Επιτάχυνση μέσω GPU}
+
+\vspace{0.25cm}
+
+\noindent\hfill Ιούλιος 2025
+
+\vspace{1cm}
+
+Η πρακτική εφαρμογή σύγχρονων στατιστικών μεθόδων καθίσταται συχνά υπολογιστικά απαγορευτική, λόγω του διαρκώς αυξανόμενου όγκου των δεδομένων και της πολυπλοκότητας των μοντέλων. Η παρούσα εργασία εξετάζει πώς η επιτάχυνση μέσω Μονάδων Επεξεργασίας Γραφικών (GPU) μπορεί να διευρύνει το πεδίο εφαρμογής τέτοιων μεθόδων. Η εργασία δομείται σε τρεις άξονες: (1) τη θεωρητική ανάλυση των υπολογιστικών «σημείων συμφόρησης» σε δύο ευρέως διαδεδομένες αλλά και εξαιρετικά απαιτητικές μεθόδους, τις Μεθόδους Πυρήνα (Kernel Methods) και το Gradient Boosting, καθώς και του αλγοριθμικού ανασχεδιασμού που απαιτείται για την αποδοτική τους εκτέλεση σε GPU, (2) την εμπειρική επικύρωση των δυνητικών κερδών απόδοσης, μέσω της συγκριτικής αξιολόγησης δύο βιβλιοθηκών λογισμικού αιχμής σε GPU, των Falkon και XGBoost, έναντι των αντίστοιχων υλοποιήσεών τους σε CPU, ποσοτικοποιώντας την επιτάχυνση σε πραγματικά σύνολα δεδομένων, και (3) την επισκόπηση των πλαισίων λογισμικού που καθιστούν εφικτές τέτοιες υλοποιήσεις, χρησιμοποιώντας ως ενδεικτική μελέτη περίπτωσης την υλοποίηση ενός μαζικά παράλληλου δειγματολήπτη Markov Chain Monte Carlo (MCMC) σε CUDA.
+
+Τα αποτελέσματα καταδεικνύουν ότι η επίτευξη σημαντικών κερδών απόδοσης σε ευρέως διαθέσιμο υλικό GPU είναι εφικτή χωρίς καμία ουσιαστική απώλεια στατιστικής ακρίβειας, υπό την προϋπόθεση ότι οι αλγόριθμοι έχουν ανασχεδιαστεί ώστε να αξιοποιούν αποδοτικά τον παραλληλισμό και τις ιεραρχίες μνήμης. Γενικότερα, τα ευρήματα τεκμηριώνουν ότι η κλιμακωσιμότητα μεθόδων στατιστικής αποτελεί πρόβλημα τόσο μηχανικής λογισμικού, όσο και μεθοδολογίας: ο ανασχεδιασμός του αλγορίθμου, η δομή των δεδομένων, και η αρχιτεκτονική του υλικού απαιτούν συνδυαστική αντιμετώπιση. Προχωρώντας από τη θεωρία στην εμπειρική τεκμηρίωση και, τέλος, στην τεχνολογία της υλοποίησης, η παρούσα εργασία στοχεύει να γεφυρώσει το χάσμα μεταξύ της προηγμένης στατιστικής μοντελοποίησης και της υπολογιστικής υψηλών επιδόσεων, παρέχοντας τα εφόδια όχι μόνο για την αξιοποίηση των GPU, αλλά και για τη συνεισφορά στο ταχέως αναπτυσσόμενο αυτό πεδίο.
+
+\newpage

@@ -28,7 +28,7 @@ While statistically powerful, this presents a significant computational challeng
 
 To maintain focus on the engineering challenges, we will implement a sampler for a simple, illustrative case: inferring the scalar mean $\mu$, of a Normal distribution given $N$ data points, $\mathbf{y} = \{ y_1, \dots, y_N \}$, with a known variance, $\sigma^2$. The statistical model is defined by:
 
-* **Likelihood**: The data is assumed to be drawn from a Normal distribution centered at $\mu$.
+* **Likelihood**: The data is assumed to be drawn from a Normal distribution centred at $\mu$.
 
 \begin{equation}
 p(\mathbf{y} | \mu, \sigma^2) = \prod_{i=1}^{N} {\mathcal{N}{(y_i|\mu, \sigma^2)}}
@@ -42,7 +42,7 @@ p(\mu) = \mathcal{N}(\mu | \mu_0, \tau_0^2)
 (\#eq:mcmc-prior)
 \end{equation}
 
-Although this conjugate model has a closed-form analytical solution, its simplicity makes it an ideal vehicle for showcasting the key engineering challenges of any parallel statistical simulation. The following subsections are structured as a methodical progression, assembling the conceptual and practical building blocks required to implement our massively paralllel MCMC sampler. In the conclusion, we will briefly contrast this low-level approach with high-level frameworks like **PyTorch**, which enable rapid prototyping by abstracting away hardware complexities.
+Although this conjugate model has a closed-form analytical solution, its simplicity makes it an ideal vehicle for showcasing the key engineering challenges of any parallel statistical simulation. The following subsections are structured as a methodical progression, assembling the conceptual and practical building blocks required to implement our massively parallel MCMC sampler. In the conclusion, we will briefly contrast this low-level approach with high-level frameworks like **PyTorch**, which enable rapid prototyping by abstracting away hardware complexities.
 
 ```{r cuda_mcmc, child = '04a-cuda-mcmc.Rmd'}
 ```

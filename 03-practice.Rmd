@@ -2,7 +2,7 @@
 
 ## Introduction: Experimental Framework
 
-In Chapter \@ref(theory), we laid the theoretical groundwork for understanding how GPU acceleration can address the computational intensity of modern statistical methods. We explored two distinct classes of algorithms: kernel methods, renowned for their ability to model complex non-linear relationships but often constrained by the the $O(n^2)$ or worse complexity of kernel matrix operations, and XGBoost, a leading gradient boosting framework whose sequential tree-building process presents a significant computational challenge. For each, we dissected their inherent scalability bottlenecks and reviewed the algorithmic innovations that create a computational profile amendable to parallelization; Nyström approximation for kernel methods, and histogram-based split-finding for XGBoost.
+In Chapter \@ref(theory), we laid the theoretical groundwork for understanding how GPU acceleration can address the computational intensity of modern statistical methods. We explored two distinct classes of algorithms: kernel methods, renowned for their ability to model complex non-linear relationships but often constrained by the $O(n^2)$ or worse complexity of kernel matrix operations, and XGBoost, a leading gradient boosting framework whose sequential tree-building process presents a significant computational challenge. For each, we dissected their inherent scalability bottlenecks and reviewed the algorithmic innovations that create a computational profile amenable to parallelization; Nyström approximation for kernel methods, and histogram-based split-finding for XGBoost.
 
 This chapter transitions from theory to practice. We aim to provide a rigorous, empirical validation of the theoretical claims by demonstrating the tangible impact of GPU acceleration on these methods. We present detailed benchmarks of state-of-the-art, GPU-accelerated libraries against their conventional CPU-based counterparts on large-scale, real-world datasets. A particular focus has been placed on ensuring that the experimental design is transparent and the results are reproducible. As such, all experimental setups, code, and resulting data are meticulously documented and have been made available in the appendices. In this section, we provide a high-level overview of the standardized experimental framework designed and applied to all benchmarks in this chapter.
 
@@ -110,13 +110,13 @@ The dataset is already well-structured, requiring minimal preprocessing:
 
 1. **Feature Set**: The dataset contains 28 features and one class label. The features are categorized into 21 low-level kinematic properties directly measured by particle detectors and 7 higher-level, derived features. All 28 features were used for the classification task. No additional feature engineering or filtering was necessary.
 
-2. **Data Splitting**: The full dataset was partitioned into a training pool (80%) and a fixed test set (20%). The handle the natural class imbalance and ensure that the training and test sets are representative of the overall data distribution, this split was stratified based on the class label. To test model scalability, training sets of varying sizes were then subsampled from the training pool, again using stratification.
+2. **Data Splitting**: The full dataset was partitioned into a training pool (80%) and a fixed test set (20%). To handle the natural class imbalance and ensure that the training and test sets are representative of the overall data distribution, this split was stratified based on the class label. To test model scalability, training sets of varying sizes were then subsampled from the training pool, again using stratification.
 
 3. **Scaling**: As with the regression dataset, all 28 features in the training and test sets were standardized using `StandardScaler`.
 
 ### Hardware and Software Environment
 
-All benchmarks were confucted within the Google Colaboratory (Colab) cloud platform to ensure a standardized and reproducible experimental environment. This choice provides on-demand access to specialized computational resources, mitigating the challenges of local hardware procurement and configuration.
+All benchmarks were conducted within the Google Colaboratory (Colab) cloud platform to ensure a standardized and reproducible experimental environment. This choice provides on-demand access to specialized computational resources, mitigating the challenges of local hardware procurement and configuration.
 
 The experimental work was carried out across two distinct hardware configurations. Initial testing and exploratory analysis was performed using the free tier of Google Colab. The primary hardware for the GPU-accelerated tests in this setting was an **NVIDIA T4 GPU** with 14.7 GB of VRAM. The corresponding CPU baseline was established using the platform's multi-core **Intel Xeon CPU @ 2.00GHz**, with access to 12.7 GB of system RAM.
 
@@ -133,7 +133,7 @@ A standardized protocol was applied to all experiments. Each GPU-accelerated imp
 The primary metrics used for evaluating computational performance are:
 
 * **Training Time**: Wall-clock time in seconds to fit the model on the training dataset.
-* **Prediction Time**: Wall-clock time in seconds to generate preditions for the held-out test set.
+* **Prediction Time**: Wall-clock time in seconds to generate predictions for the held-out test set.
 
 #### Statistical Accuracy Metrics
 

@@ -32,10 +32,6 @@ In this augmented model, the CPU often acts as an orchestrator, managing the wor
 
 GPUs primarily use the Single Instruction, Multiple Thread (SIMT) model. This paradigm allows a single instruction to be issued to a large number of threads, which then execute it concurrently, each operating on distinct data. While building upon principles seen in earlier Single Instruction, Multiple Data (SIMD) architectures, SIMT offers greater flexibility in managing thread execution.
 
-```{r cuda-kernel-execution, echo=FALSE, fig.cap="Correlation between CUDA programming paradigms and hardware conventions.", fig.align='center', out.width="80%", fig.pos='H'}
-knitr::include_graphics("img/chapter_1/cuda_kernel_execution.png")
-```
-
 Code designed for GPU execution is encapsulated within a *kernel*, which is essentially a function compiled to run on the GPU *device*. When the *host* CPU launches a kernel, it defines a grid of thread blocks. Each thread block, in turn, is composed of individual threads. All threads within this grid execute the same kernel code. However, each thread possesses a unique identifier (its thread ID), enabling it to access different data elements and follow distinct execution paths within the kernel, allowing for diverse computations despite running the same core program.
 
 The execution of these threads is managed by the SMs on the GPU. Within each SM, threads are organized and scheduled in groups of 32, known as warps. An SM issues instructions to an entire warp at a time, meaning all 32 threads in a warp execute the same instruction in lockstep during a given cycle.
@@ -45,6 +41,10 @@ This lockstep execution is highly efficient for uniform computations. However, i
 To manage the high latency of operations like accessing global memory access, SMs are designed for latency hiding. If one warp stalls, for instance, while waiting for data to be fetched from global memory, the SM can rapidly context-switch to another warp that is ready to execute. This ability to hide latency by interleaving the execution of many active warps is a cornerstone of GPU performance because it ensures that the processing units remain highly utilized. Consequently, launching a sufficient number of warps, often organized into multiple thread blocks per SM, is crucial for achieving optimal throughput.
 
 It is important to understand that the execution order of threads or even entire thread blocks is not guaranteed. Without explicit synchronization mechanisms employed by the programmer, there is no way to know when one block will execute relative to another. This inherent parallelism requires careful algorithm design to correctly manage any dependencies between threads in different blocks.
+
+```{r cuda-kernel-execution, echo=FALSE, fig.cap="Correlation between CUDA programming paradigms and hardware conventions.", fig.align='center', out.width="70%", fig.pos='H'}
+knitr::include_graphics("img/chapter_1/cuda_kernel_execution.png")
+```
 
 ### GPU Memory Hierarchy {#gpu-memory}
 

@@ -1,0 +1,42 @@
+% ===============================================================
+% PREAMBLE FOR THESIS
+% ===============================================================
+
+% --- Package Options -------------------------------------------
+% Pass options to packages loaded by the main template
+\PassOptionsToPackage{tracking=true}{microtype}
+
+% --- Load Packages ---------------------------------------------
+\usepackage{float}
+\usepackage{sectsty}
+\usepackage{paralist}
+\usepackage{fancyhdr}
+\usepackage{dcolumn}
+\usepackage[nottoc, numbib]{tocbibind}
+\usepackage{subcaption}
+\usepackage{hyperref}
+
+% --- Page Layout & Spacing -------------------------------------
+% Configure page numbers to be centered in the footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[LE]{\nouppercase{\leftmark}}
+\fancyhead[RO]{\nouppercase{\rightmark}}
+
+% Prevent pages with little content from stretching vertically
+\raggedbottom
+
+% --- Typography ------------------------------------------------
+% Configure expanded character spacing
+\SetTracking{encoding=*, family=rm* }{50}
+
+% Configure custom section heading styles
+\allsectionsfont{\centering}
+\subsectionfont{\raggedright}
+\subsubsectionfont{\raggedright}
+
+% --- Document Structure ----------------------------------------
+% Switch to Roman numerals for front matter
+\frontmatter

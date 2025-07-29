@@ -6,7 +6,7 @@ Section \@ref(kernel-methods) established the theoretical foundations of kernel 
 
 Falkon is an open-source Python library designed to scale up kernel methods to very large datasets with multi-GPU acceleration. It implements solvers for both approximate Kernel Ridge Regression (KRR), which seeks to solve the optimization problem outlined in \@ref(eq:krr-dual), and Kernel Logistic Regression (KLR). As discussed previously, traditional, exact kernel methods face significant computational bottlenecks due to the need to construct and manipulate the $n \times n$ kernel matrix $\mathbf{K}_{nn}$, leading to $O(n^2)$ memory and $O(n^3)$ time complexities. Falkon addresses these challenges by integrating Nyström approximation with a preconditioned CG solver, implemented on a PyTorch backend to leverage GPU parallelism.
 
-The library's core algorithm centers around approximating the full kernel matrix with a much smaller $n \times m$ matrix based on $m$ Nyström centers (with $m \ll n$), approximating $\mathbf{K}_{nn}$ as in \@ref(eq:nystrom-approx) and effectively reducing the complexity for solving KRR from $O(n^3)$ to roughly $O(n m^2)$. The computationally intensive operations, such as kernel evaluations and the iterative CG solver used to handle the resulting linear system (akin to solving the preconditioned system \@ref(eq:preconditioned-krr-nystrom)), are parallelized on the GPU, leveraging strategies such as out-of-core operations and Falkon's specific memory optimization techniques discussed in the previous chapter. The library can be further accelerated by integrating with KeOps, an efficient C++ library for fast kernel evaluations. This design allows Falkon to handle datasets with millions (or even billions) of points, which would be intractable for exact kernel methods.
+The library's core algorithm centres around approximating the full kernel matrix with a much smaller $n \times m$ matrix based on $m$ Nyström centres (with $m \ll n$), approximating $\mathbf{K}_{nn}$ as in \@ref(eq:nystrom-approx) and effectively reducing the complexity for solving KRR from $O(n^3)$ to roughly $O(n m^2)$. The computationally intensive operations, such as kernel evaluations and the iterative CG solver used to handle the resulting linear system (akin to solving the preconditioned system \@ref(eq:preconditioned-krr-nystrom)), are parallelized on the GPU, leveraging strategies such as out-of-core operations and Falkon's specific memory optimization techniques discussed in the previous chapter. The library can be further accelerated by integrating with KeOps, an efficient C++ library for fast kernel evaluations. This design allows Falkon to handle datasets with millions (or even billions) of points, which would be intractable for exact kernel methods.
 
 ### Experimental Setup
 
@@ -76,25 +76,6 @@ fal_bm1[!(run_type %like% "Falkon"), m_points := NA]
 ```
 
 ```{r}
-get_falkon_metrics <- function(dat, size) {
-  get_row <- function(rt) dat[run_type == rt & n_samples == size]
-  
-  cpu <- get_row("Falkon (CPU)")
-  gpu <- get_row("Falkon (GPU)")
-  
-  format_pm <- function(mean, sd) sprintf("%.2f ± %.2f", mean, sd)
-  
-  list(
-    train_cpu = format_pm(cpu$train_time, cpu$train_sd),
-    train_gpu = format_pm(gpu$train_time, gpu$train_sd),
-    train_speedup = sprintf("%.0f", cpu$train_time / gpu$train_time),
-    
-    pred_cpu = format_pm(cpu$pred_time, cpu$pred_sd),
-    pred_gpu = format_pm(gpu$pred_time, gpu$pred_sd),
-    pred_speedup = sprintf("%.0f", cpu$pred_time / gpu$pred_time)
-  )
-}
-
 falkon_20k <- get_falkon_metrics(fal_bm1, 20000)
 falkon_20k_cpu <- falkon_20k$train_cpu
 falkon_20k_gpu <- falkon_20k$train_gpu
@@ -146,7 +127,7 @@ kable(
   align = "rrlrrrr",
   digits = 4,
   escape = FALSE,
-  caption = "Scalability Benchmark Results: A comparison of training time (s), prediction time (s), RMSE, and $R^2$ for Falkon (GPU), Falkon (CPU), and Scikit-learn (CPU) across varying sample sizes ($n$) with number of centers $m = \\lfloor \\log{n} \\sqrt{n} \\rfloor$."
+  caption = "Scalability Benchmark Results: A comparison of training time (s), prediction time (s), RMSE, and $R^2$ for Falkon (GPU), Falkon (CPU), and Scikit-learn (CPU) across varying sample sizes ($n$) with number of centres $m = \\lfloor \\log{n} \\sqrt{n} \\rfloor$."
 ) |>
   row_spec(line_positions, extra_latex_after = "\\midrule") |>
   kable_styling(latex_options = "repeat_header")
@@ -184,11 +165,11 @@ Critically, this dramatic acceleration did not compromise model quality. Across 
 
 ### Benchmark 2: Accuracy vs. Nyström Centers ($m$)
 
-While the first benchmark established computational scalability, this second experiment assesses the relationship between the number of Nyström centers ($m$) and the model's predictive accuracy. This test is crucial for validating that the Nyström approximation, while efficient, can still yield a high-quality predictive model. The number of training samples was fixed at a large scale of $n = 5,000,000$, while $m$ was varied across a range from approximately $0.1 \sqrt{n}$ to $10 \sqrt{n}$.
+While the first benchmark established computational scalability, this second experiment assesses the relationship between the number of Nyström centres ($m$) and the model's predictive accuracy. This test is crucial for validating that the Nyström approximation, while efficient, can still yield a high-quality predictive model. The number of training samples was fixed at a large scale of $n = 5,000,000$, while $m$ was varied across a range from approximately $0.1 \sqrt{n}$ to $10 \sqrt{n}$.
 
 #### Overcoming a Data Engineering Bottleneck
 
-Pushing the dataset to a size of $n = 5$ million revealed a critical bottleneck at the current configuration. The initial approach of loading and processing the full source dataset in each iteration of the experiment led to out-of-memory errors. This was note due to a lack of total available RAM, but rather a phenomenon known as memory fragmentation, where the repeated allocation and de-allocation of a multi-GB block of memory prevented the system from finding a contiguous block for subsequent loads. To resolve this, a disk-based caching strategy was implemented: once the final, processed PyTorch tensors were created, they were saved to a file and loaded directly in subsequent runs, enabling stable execution of the large-scale benchmark.
+Pushing the dataset to a size of $n = 5$ million revealed a critical bottleneck at the current configuration. The initial approach of loading and processing the full source dataset in each iteration of the experiment led to out-of-memory errors. This was not due to a lack of total available RAM, but rather a phenomenon known as memory fragmentation, where the repeated allocation and de-allocation of a multi-GB block of memory prevented the system from finding a contiguous block for subsequent loads. To resolve this, a disk-based caching strategy was implemented: once the final, processed PyTorch tensors were created, they were saved to a file and loaded directly in subsequent runs, enabling stable execution of the large-scale benchmark.
 
 #### Accuracy vs. Number of Centers (*m*)
 
@@ -269,7 +250,7 @@ kable(
   align = "rrlrrrr",
   digits = 4,
   escape = FALSE,
-  caption = "Accuracy vs. Nyström Centers: Results from Benchmark 2 showing model accuracy as a function of Nyström centers $m$ with a fixed sample size $n = 5{,}000{,}000$."
+  caption = "Accuracy vs. Nyström Centers: Results from Benchmark 2 showing model accuracy as a function of Nyström centres $m$ with a fixed sample size $n = 5{,}000{,}000$."
 ) |>
   kable_styling(
     latex_options = c("striped", "repeat_header"),
@@ -278,9 +259,9 @@ kable(
   )
 ```
 
-There is a clear and significant improvement in accuracy as $m$ initially increases. With a very small number of centers ($m =$ `r falkon2_small_m`), the model produces a poor approximation (RMSE of `r falkon2_small_rmse`). However, as $m$ increases towards $\sqrt{n}$ at $m =$ `r falkon2_sqrt_n`, the performance improves dramatically, with the RMSE dropping by over `r falkon2_sqrt_drop`% to `r falkon2_sqrt_rmse`. The model's performance continues to improve, reaching a peach accuracy at approximately $8\sqrt{n}$, where the RMSE is minimized at `r falkon2_min_rmse` and the $R^2$ score is maximized at `r falkon2_max_r2`.
+There is a clear and significant improvement in accuracy as $m$ initially increases. With a very small number of centres ($m =$ `r falkon2_small_m`), the model produces a poor approximation (RMSE of `r falkon2_small_rmse`). However, as $m$ increases towards $\sqrt{n}$ at $m =$ `r falkon2_sqrt_n`, the performance improves dramatically, with the RMSE dropping by over `r falkon2_sqrt_drop`% to `r falkon2_sqrt_rmse`. The model's performance continues to improve, reaching a peak accuracy at approximately $8\sqrt{n}$, where the RMSE is minimized at `r falkon2_min_rmse` and the $R^2$ score is maximized at `r falkon2_max_r2`.
 
-```{r falkon-bm2-accuracy, fig.cap = "Effect of Nyström centers on model accuracy at fixed $n = 5{,}000{,}000$.", fig.width=6.5, fig.height=4.5, out.width="70%", fig.align='center'}
+```{r falkon-bm2-accuracy, fig.cap = "Effect of Nyström centres on model accuracy at fixed $n = 5{,}000{,}000$.", fig.width=6.5, fig.height=4.5, out.width="70%", fig.align='center'}
 # Ensure m_points is numeric
 fal_m$m_points <- as.numeric(fal_m$m_points)
 
@@ -302,7 +283,7 @@ ggplot(fal_m, aes(x = m_points, y = RMSE)) +
   )
 ```
 
-Interestingly, increasing $m$ beyond this point does not necessarily yield further improvements. As observed in Figure \@ref(fig:falkon-bm2-accuracy), the performance effectively plateaus and fluctuates within a high-accuracy band. This behavior suggests that the model is approaching a practical limit, likely due to the onset of numerical instability. As the matrix of Nyström centers becomes very large, its Cholesky decomposition, a key step in calculating the preconditioner, can become ill-conditioned when performed with single-precision (Float32) arithmetic on the GPU. This can lead to small numerical errors that prevent the solver from converging to a marginally better solution, even with a theoretically better approximation.
+Interestingly, increasing $m$ beyond this point does not necessarily yield further improvements. As observed in Figure \@ref(fig:falkon-bm2-accuracy), the performance effectively plateaus and fluctuates within a high-accuracy band. This behavior suggests that the model is approaching a practical limit, likely due to the onset of numerical instability. As the matrix of Nyström centres becomes very large, its Cholesky decomposition, a key step in calculating the preconditioner, can become ill-conditioned when performed with single-precision (Float32) arithmetic on the GPU. This can lead to small numerical errors that prevent the solver from converging to a marginally better solution, even with a theoretically better approximation.
 
 This finding empirically validates that while a larger $m$ is generally better, there is a point of diminishing returns where the theoretical benefit is offset by the practical limitations of hardware precision. It also underlines the importance of validating nuanced hardware limits and adjusting settings accordingly.
 
@@ -312,4 +293,4 @@ The benchmarks from the NYC Taxi Fare Prediction task provide compelling evidenc
 
 The scalability analysis unequivocally demonstrates the practical limits of traditional and CPU-based methods, while highlighting the dramatic speedup (over $50\times$ in some cases) and superior scalability of the GPU-accelerated implementation. This enables the analysis of datasets that are orders of magnitude larger than previously feasible on comparable hardware.
 
-Furthermore, the investigation into the number of Nyström centers ($m$) provides a crucial practical insight. The results confirm that $m$ is a key hyperparameter that governs a trade-off between computational cost and predictive accuracy. While increasing $m$ initially leads to substantial gains, the experiment reveals a performance plateau, likely due to numerical precision limits on the GPU. This finding suggests that an optimal number of centers often exists that maximizes accuracy without incurring unnecessary computational cost or risking numerical instability.
+Furthermore, the investigation into the number of Nyström centres ($m$) provides a crucial practical insight. The results confirm that $m$ is a key hyperparameter that governs a trade-off between computational cost and predictive accuracy. While increasing $m$ initially leads to substantial gains, the experiment reveals a performance plateau, likely due to numerical precision limits on the GPU. This finding suggests that an optimal number of centres often exists that maximizes accuracy without incurring unnecessary computational cost or risking numerical instability.

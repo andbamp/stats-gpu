@@ -22,6 +22,8 @@ For statistics, this opens up new possibilities for many foundational and advanc
 
 By effectively mapping the parallelizable components of these algorithms onto the GPU architecture, it is possible to achieve significant reductions in computation time. This acceleration not only enables more complex analysis on larger datasets but also facilitates faster research iterations and more thorough model exploration.
 
+\newpage
+
 ## Directions of Future Research
 
 The work presented here opens several promising avenues for future research. While this thesis focused primarily on single-GPU implementations, a natural next step is to explore **distributed, multi-GPU training** to tackle problems that exceed the memory capacity of a single card. Most importantly, there is a significant opportunity to develop highly-optimized parallel libraries for advanced statistical domains where GPU acceleration is still underexplored.
